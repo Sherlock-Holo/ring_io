@@ -1,6 +1,6 @@
 use std::ffi::CString;
-use std::io::SeekFrom;
 use std::io::{Read, Result, Write};
+use std::io::SeekFrom;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -17,7 +17,7 @@ use crate::fs::open::Open;
 
 use super::buffer::Buffer;
 
-pub struct File<D: Drive = DemoDriver> {
+pub struct File<D> {
     fd: RawFd,
     buf: Option<Buffer>,
     event: Arc<Event>,
@@ -25,7 +25,7 @@ pub struct File<D: Drive = DemoDriver> {
     driver: D,
 }
 
-impl<D: Drive> File<D> {
+impl<D> File<D> {
     pub(crate) fn new(fd: RawFd, driver: D) -> Self {
         Self {
             fd,
@@ -49,9 +49,15 @@ impl<D: Drive> File<D> {
 
 impl File<DemoDriver> {
     pub fn open(path: impl AsRef<Path>) -> Open<DemoDriver> {
+        Self::open_with_driver(path, DemoDriver::new())
+    }
+}
+
+impl<D: Drive> File<D> {
+    pub fn open_with_driver(path: impl AsRef<Path>, driver: D) -> Open<D> {
         let c_path = CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
 
-        Open::new_read_only(c_path, DemoDriver::default())
+        Open::new_read_only(c_path, driver)
     }
 }
 
@@ -286,7 +292,7 @@ impl<D: Drive + Unpin> AsyncSeek for File<D> {
     }
 }
 
-impl<D: Drive> Drop for File<D> {
+impl<D> Drop for File<D> {
     fn drop(&mut self) {
         self.cancel();
 
