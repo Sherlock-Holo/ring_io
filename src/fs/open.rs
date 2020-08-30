@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::io::Error;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -19,7 +20,7 @@ pub struct Open<D: Drive> {
     event: Arc<Event>,
     flags: c_int,
     mode: mode_t,
-    driver: D,
+    driver: Option<D>,
 }
 
 impl<D: Drive> Open<D> {
@@ -33,12 +34,12 @@ impl<D: Drive> Open<D> {
             event: Arc::new(Event::Nothing),
             flags,
             mode,
-            driver,
+            driver: Some(driver),
         }
     }
 }
 
-impl<D: Drive + Unpin + Clone> Future for Open<D> {
+impl<D: Drive + Unpin> Future for Open<D> {
     type Output = io::Result<File<D>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -51,13 +52,15 @@ impl<D: Drive + Unpin + Clone> Future for Open<D> {
                 if open_event.result.is_none() {
                     open_event.waker.register(cx.waker());
 
-                    futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
+                    futures_util::ready!(
+                        Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, false)
+                    )?;
 
                     Poll::Pending
                 } else {
                     let fd = open_event.result.take().unwrap()?;
 
-                    Poll::Ready(Ok(File::new(fd as _, this.driver.clone())))
+                    Poll::Ready(Ok(File::new(fd as _, this.driver.take().unwrap())))
                 }
             }
 
@@ -66,9 +69,8 @@ impl<D: Drive + Unpin + Clone> Future for Open<D> {
                 let flags = this.flags;
                 let mode = this.mode;
 
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
-                    cx,
-                    |sqe, cx| {
+                let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
+                    .poll_prepare(cx, |sqe, cx| {
                         unsafe {
                             uring_sys::io_uring_prep_openat(
                                 sqe.raw_mut(),
@@ -84,12 +86,11 @@ impl<D: Drive + Unpin + Clone> Future for Open<D> {
                         open_event.waker.register(cx.waker());
 
                         Arc::new(Event::Open(Mutex::new(open_event)))
-                    }
-                ))?;
+                    }))?;
 
                 this.event = event;
 
-                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
+                futures_util::ready!(Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, true))?;
 
                 Poll::Pending
             }
@@ -135,7 +136,7 @@ impl OpenOptions {
         }
     }
 
-    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File<DemoDriver>> {
         let flags = libc::O_CLOEXEC
             | self.get_access_mode()?
             | self.get_creation_mode()?
@@ -210,5 +211,19 @@ impl OpenOptions {
             (true, true, false) => libc::O_CREAT | libc::O_TRUNC,
             (_, _, true) => libc::O_CREAT | libc::O_EXCL,
         })
+    }
+}
+
+impl OpenOptionsExt for OpenOptions {
+    fn mode(&mut self, mode: u32) -> &mut Self {
+        self.mode = mode;
+
+        self
+    }
+
+    fn custom_flags(&mut self, flags: i32) -> &mut Self {
+        self.custom_flags = flags;
+
+        self
     }
 }
