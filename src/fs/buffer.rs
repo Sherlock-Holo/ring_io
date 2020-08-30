@@ -25,6 +25,16 @@ impl Buffer {
 
     pub fn reset(&mut self) {
         self.offset = 0;
+
+        self.buf.clear();
+
+        self.buf.resize(self.buf.capacity(), 0);
+    }
+
+    pub fn resize(&mut self, mut new_len: usize, value: u8) {
+        new_len += self.offset;
+
+        self.buf.resize(new_len, value);
     }
 }
 

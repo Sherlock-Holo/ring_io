@@ -1,14 +1,15 @@
 use std::ffi::CString;
+use std::io::SeekFrom;
 use std::io::{Read, Result, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use std::path::PathBuf;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Buf;
-use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
+use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::drive::{DemoDriver, Drive};
 use crate::event::{Event, ReadEvent, WriteEvent};
@@ -20,8 +21,7 @@ pub struct File<D: Drive = DemoDriver> {
     fd: RawFd,
     buf: Option<Buffer>,
     event: Arc<Event>,
-    read_offset: usize,
-    write_offset: usize,
+    offset: usize,
     driver: D,
 }
 
@@ -31,8 +31,7 @@ impl<D: Drive> File<D> {
             fd,
             buf: None,
             event: Arc::new(Event::Nothing),
-            read_offset: 0,
-            write_offset: 0,
+            offset: 0,
             driver,
         }
     }
@@ -49,12 +48,10 @@ impl<D: Drive> File<D> {
 }
 
 impl File<DemoDriver> {
-    pub fn open(path: impl Into<PathBuf>) -> Open<DemoDriver> {
-        let path = path.into();
+    pub fn open(path: impl AsRef<Path>) -> Open<DemoDriver> {
+        let c_path = CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
 
-        let c_path = CString::new(path.into_os_string().as_bytes()).unwrap();
-
-        Open::new(c_path, DemoDriver::default())
+        Open::new_read_only(c_path, DemoDriver::default())
     }
 }
 
@@ -107,9 +104,17 @@ impl<D: Drive + Unpin> AsyncBufRead for File<D> {
             _ => {
                 this.cancel();
 
-                let mut buf = this.buf.take().unwrap_or_else(|| Buffer::new(4096));
+                let mut buf = this
+                    .buf
+                    .take()
+                    .map(|mut buf| {
+                        buf.resize(4096, 0);
 
-                let read_offset = this.read_offset;
+                        buf
+                    })
+                    .unwrap_or_else(|| Buffer::new(4096));
+
+                let offset = this.offset;
                 let fd = this.fd;
                 let waker = cx.waker().clone();
 
@@ -117,7 +122,7 @@ impl<D: Drive + Unpin> AsyncBufRead for File<D> {
                     cx,
                     |sqe, _cx| {
                         unsafe {
-                            sqe.prep_read(fd, buf.as_mut(), read_offset);
+                            sqe.prep_read(fd, buf.as_mut(), offset);
                         }
 
                         let read_event = ReadEvent::new(buf);
@@ -143,11 +148,11 @@ impl<D: Drive + Unpin> AsyncBufRead for File<D> {
             let mut read_event = read_event.lock().unwrap();
 
             if let Some(Ok(mut result)) = read_event.result.take() {
-                assert!(result > amt);
+                assert!(result >= amt);
 
                 result -= amt;
 
-                this.read_offset += amt;
+                this.offset += amt;
 
                 if let Some(buf) = this.buf.as_mut() {
                     buf.advance(amt);
@@ -205,30 +210,18 @@ impl<D: Drive + Unpin> AsyncWrite for File<D> {
             _ => {
                 this.cancel();
 
-                let buf = this
-                    .buf
-                    .take()
-                    .map(|mut buf| {
-                        buf.write_all(data).expect("fill data to buf failed");
+                let mut buf = this.buf.take().unwrap_or_else(|| Buffer::new(data.len()));
 
-                        buf
-                    })
-                    .unwrap_or_else(|| {
-                        let mut buf = Buffer::new(data.len());
-
-                        buf.write_all(data).expect("fill data to buf failed");
-
-                        buf
-                    });
+                buf.write_all(data).expect("fill data to buf failed");
 
                 let fd = this.fd;
-                let write_offset = this.write_offset;
+                let offset = this.offset;
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, cx| {
                         unsafe {
-                            sqe.prep_write(fd, buf.as_ref(), write_offset);
+                            sqe.prep_write(fd, buf.as_ref(), offset);
                         }
 
                         let write_event = WriteEvent::new(buf);
@@ -267,6 +260,32 @@ impl<D: Drive + Unpin> AsyncWrite for File<D> {
     }
 }
 
+impl<D: Drive + Unpin> AsyncSeek for File<D> {
+    fn poll_seek(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        pos: SeekFrom,
+    ) -> Poll<Result<u64>> {
+        match pos {
+            SeekFrom::Start(pos) => {
+                self.offset = pos as _;
+            }
+
+            SeekFrom::End(_) => todo!(),
+
+            SeekFrom::Current(pos) => {
+                if pos < 0 {
+                    self.offset -= -pos as usize;
+                } else {
+                    self.offset += pos as usize;
+                }
+            }
+        }
+
+        Poll::Ready(Ok(self.offset as u64))
+    }
+}
+
 impl<D: Drive> Drop for File<D> {
     fn drop(&mut self) {
         self.cancel();
@@ -274,5 +293,92 @@ impl<D: Drive> Drop for File<D> {
         unsafe {
             libc::close(self.fd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    use crate::fs::OpenOptions;
+
+    use super::*;
+
+    #[test]
+    fn test_file_open() {
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+
+        let path = temp_file.path();
+
+        futures_executor::block_on(async {
+            let _file = File::open(path).await.unwrap();
+        })
+    }
+
+    #[test]
+    fn test_file_read() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+
+        temp_file.as_file_mut().write_all(b"test").unwrap();
+        temp_file.as_file_mut().flush().unwrap();
+
+        let path = temp_file.path();
+
+        futures_executor::block_on(async {
+            let mut file = File::open(path).await.unwrap();
+
+            let mut buf = vec![0; 4];
+
+            file.read_exact(&mut buf).await.unwrap();
+
+            assert_eq!(b"test".as_ref(), buf.as_slice());
+        })
+    }
+
+    #[test]
+    fn test_file_write() {
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+
+        let path = temp_file.path();
+
+        futures_executor::block_on(async {
+            let mut file = OpenOptions::new().write(true).open(path).await.unwrap();
+
+            file.write_all(b"test").await.unwrap();
+            file.flush().await.unwrap();
+        });
+
+        let mut buf = vec![0; 4];
+
+        temp_file.read_exact(&mut buf).unwrap();
+
+        assert_eq!(b"test".as_ref(), buf.as_slice());
+    }
+
+    #[test]
+    fn test_file_write_read() {
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+
+        let path = temp_file.path();
+
+        futures_executor::block_on(async {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .await
+                .unwrap();
+
+            file.write_all(b"test").await.unwrap();
+            file.flush().await.unwrap();
+
+            assert_eq!(file.seek(SeekFrom::Start(0)).await.unwrap(), 0);
+
+            let mut buf = vec![0; 4];
+
+            file.read_exact(&mut buf).await.unwrap();
+
+            assert_eq!(b"test".as_ref(), buf.as_slice());
+        })
     }
 }

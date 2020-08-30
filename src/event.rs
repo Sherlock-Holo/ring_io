@@ -103,6 +103,7 @@ impl WriteEvent {
     }
 }
 
+#[derive(Default)]
 pub struct OpenEvent {
     pub waker: AtomicWaker,
     pub result: Option<io::Result<usize>>,

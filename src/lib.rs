@@ -1,5 +1,4 @@
 mod drive;
-// mod state;
 mod event;
-mod fs;
+pub mod fs;
 mod ring;
