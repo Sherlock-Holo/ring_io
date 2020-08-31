@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub use demo::DemoDriver;
-
-use crate::event::Event;
+pub use event::*;
 
 mod demo;
+mod event;
 
 /// Implemented by drivers for io-uring.
 ///

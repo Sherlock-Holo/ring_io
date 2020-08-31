@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 
 use libc::{c_int, mode_t};
 
-use crate::drive::{DemoDriver, Drive};
-use crate::event::{Event, OpenEvent};
+use crate::drive::{DemoDriver, Drive, Event, OpenEvent};
+use crate::file_descriptor::FileDescriptor;
 use crate::fs::File;
 
 pub struct Open<D: Drive> {
@@ -60,7 +60,11 @@ impl<D: Drive + Unpin> Future for Open<D> {
                 } else {
                     let fd = open_event.result.take().unwrap()?;
 
-                    Poll::Ready(Ok(File::new(fd as _, this.driver.take().unwrap())))
+                    Poll::Ready(Ok(File::new(FileDescriptor::new(
+                        fd as _,
+                        this.driver.take().unwrap(),
+                        0,
+                    ))))
                 }
             }
 

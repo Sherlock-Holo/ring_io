@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use futures_util::task::AtomicWaker;
 
-use crate::fs::buffer::Buffer;
+use crate::file_descriptor::buffer::Buffer;
 
 pub enum Event {
     Nothing,

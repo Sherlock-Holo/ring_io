@@ -9,7 +9,7 @@ use iou::{CompletionQueueEvent, SubmissionQueueEvent};
 use once_cell::sync::Lazy;
 use slab::Slab;
 
-use crate::event::Event;
+use crate::drive::event::Event;
 
 use super::Drive;
 
@@ -135,7 +135,7 @@ fn consume_cqe(cqe: CompletionQueueEvent) {
 
     let mut slab = get_slab().lock().unwrap();
 
-    if slab.get(user_data).is_none() {
+    if !slab.contains(user_data) {
         return;
     }
 
