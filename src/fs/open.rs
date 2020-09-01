@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 
 use libc::{c_int, mode_t};
 
-use crate::drive::{DemoDriver, Drive, Event, OpenEvent};
+use crate::drive::{self, DemoDriver, Drive, Event, OpenEvent};
 use crate::file_descriptor::FileDescriptor;
 use crate::fs::File;
 
@@ -149,7 +149,7 @@ impl OpenOptions {
         let path = path.as_ref().as_os_str();
         let path = CString::new(path.as_bytes()).unwrap();
 
-        Open::new(path, flags, self.mode, DemoDriver::new()).await
+        Open::new(path, flags, self.mode, drive::get_default_driver()).await
     }
 
     pub fn read(&mut self, read: bool) -> &mut Self {

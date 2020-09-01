@@ -8,7 +8,7 @@ use futures_util::io::SeekFrom;
 
 pub use open::*;
 
-use crate::drive::{DemoDriver, Drive};
+use crate::drive::{self, DemoDriver, Drive};
 use crate::file_descriptor::FileDescriptor;
 
 mod metadata;
@@ -26,7 +26,7 @@ impl<D> File<D> {
 
 impl File<DemoDriver> {
     pub fn open(path: impl AsRef<Path>) -> Open<DemoDriver> {
-        FileDescriptor::open_with_driver(path, DemoDriver::new())
+        FileDescriptor::open_with_driver(path, drive::get_default_driver())
     }
 }
 

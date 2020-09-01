@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+pub use demo::get_default_driver;
 pub use demo::DemoDriver;
 pub use event::*;
 

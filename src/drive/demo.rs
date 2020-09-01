@@ -2,10 +2,10 @@ use std::io::Result;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::thread;
+use std::{ptr, thread};
 
 use futures_util::task::AtomicWaker;
-use iou::{CompletionQueueEvent, SubmissionQueueEvent};
+use iou::{CompletionQueueEvent, Registrar, SubmissionQueue, SubmissionQueueEvent};
 use once_cell::sync::Lazy;
 use slab::Slab;
 
@@ -13,22 +13,26 @@ use crate::drive::event::Event;
 
 use super::Drive;
 
-const SQ_ENTRIES: u32 = 1024;
+pub fn get_default_driver() -> DemoDriver {
+    const SQ_ENTRIES: u32 = 1024;
 
-static SQ: Lazy<Mutex<iou::SubmissionQueue<'static>>> = Lazy::new(init_sq);
+    static DRIVER: Lazy<DemoDriver> = Lazy::new(|| DemoDriver::new(SQ_ENTRIES).unwrap());
+
+    let driver = &*DRIVER;
+
+    driver.clone()
+}
 
 #[derive(Clone)]
 pub struct DemoDriver {
-    sq: &'static Mutex<iou::SubmissionQueue<'static>>,
-    waker: &'static AtomicWaker,
+    inner: Arc<InnerDriver>,
 }
 
 impl DemoDriver {
-    pub fn new() -> Self {
-        Self {
-            sq: &SQ,
-            waker: get_waker(),
-        }
+    pub fn new(entries: u32) -> Result<Self> {
+        Ok(DemoDriver {
+            inner: Arc::new(InnerDriver::new(entries)?),
+        })
     }
 }
 
@@ -38,11 +42,11 @@ impl Drive for DemoDriver {
         cx: &mut Context<'cx>,
         prepare: impl FnOnce(&mut SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
     ) -> Poll<Result<Arc<Event>>> {
-        let mut sq = self.sq.lock().unwrap();
+        let mut sq = self.inner.sq.lock().unwrap();
 
         match sq.next_sqe() {
             None => {
-                self.waker.register(cx.waker());
+                self.inner.waker.register(cx.waker());
 
                 Poll::Pending
             }
@@ -50,7 +54,7 @@ impl Drive for DemoDriver {
             Some(mut sqe) => {
                 let event = prepare(&mut sqe, cx);
 
-                let user_data = get_slab().lock().unwrap().insert(event.clone());
+                let user_data = self.inner.slab.lock().unwrap().insert(event.clone());
 
                 sqe.set_user_data(user_data as _);
 
@@ -64,64 +68,88 @@ impl Drive for DemoDriver {
         _cx: &mut Context<'_>,
         _eager: bool,
     ) -> Poll<Result<usize>> {
-        let mut sq = self.sq.lock().unwrap();
+        let mut sq = self.inner.sq.lock().unwrap();
 
         // for now ignore eager
         Poll::Ready(sq.submit())
     }
 }
 
-impl Default for DemoDriver {
-    fn default() -> Self {
-        Self::new()
+struct InnerDriver {
+    ring: *mut iou::IoUring,
+    sq: Mutex<SubmissionQueue<'static>>,
+    _registrar: Registrar<'static>,
+    waker: Arc<AtomicWaker>,
+    slab: Arc<Mutex<Slab<Arc<Event>>>>,
+}
+
+impl InnerDriver {
+    fn new(entries: u32) -> Result<Self> {
+        let ring_pointer = Box::into_raw(Box::new(iou::IoUring::new(entries)?));
+
+        // Safety: ring is allocated on heap
+        let ring_ref: &'static mut _ = unsafe { &mut *ring_pointer };
+
+        let (sq, cq, registrar) = ring_ref.queues();
+
+        let sq = Mutex::new(sq);
+
+        let waker = Arc::new(AtomicWaker::new());
+        let slab = Arc::new(Mutex::new(Slab::with_capacity(entries as _)));
+
+        {
+            let waker = waker.clone();
+            let slab = slab.clone();
+
+            thread::spawn(move || complete(cq, &waker, slab));
+        }
+
+        Ok(Self {
+            ring: ring_pointer,
+            sq,
+            _registrar: registrar,
+            waker,
+            slab,
+        })
     }
 }
 
-fn init_sq() -> Mutex<iou::SubmissionQueue<'static>> {
-    // Safety: won't call this function twice
-    unsafe {
-        static mut RING: Option<iou::IoUring> = None;
+unsafe impl Send for InnerDriver {}
 
-        RING = Some(iou::IoUring::new(SQ_ENTRIES).expect("TODO handle io_uring_init failure"));
+unsafe impl Sync for InnerDriver {}
 
-        let (sq, cq, _) = RING.as_mut().unwrap().queues();
-
-        thread::spawn(move || complete(cq));
-
-        Mutex::new(sq)
+impl Drop for InnerDriver {
+    fn drop(&mut self) {
+        unsafe {
+            ptr::drop_in_place(self.ring);
+        }
     }
 }
 
-fn get_waker() -> &'static AtomicWaker {
-    static WAKER: Lazy<AtomicWaker> = Lazy::new(AtomicWaker::new);
-
-    &WAKER
-}
-
-fn get_slab() -> &'static Mutex<Slab<Arc<Event>>> {
-    static SLAB: Lazy<Mutex<Slab<Arc<Event>>>> = Lazy::new(|| Mutex::new(Slab::new()));
-
-    &SLAB
-}
-
-unsafe fn complete(mut cq: iou::CompletionQueue<'static>) {
+fn complete(
+    mut cq: iou::CompletionQueue<'static>,
+    waker: &AtomicWaker,
+    slab: Arc<Mutex<Slab<Arc<Event>>>>,
+) {
     while let Ok(cqe) = cq.wait_for_cqe() {
-        get_waker().wake();
+        let mut slab = slab.lock().unwrap();
+
+        waker.wake();
 
         let mut ready = cq.ready() as usize + 1;
 
-        consume_cqe(cqe);
+        consume_cqe(cqe, &mut slab);
 
         ready -= 1;
 
         while let Some(cqe) = cq.peek_for_cqe() {
-            get_waker().wake();
+            waker.wake();
 
             if ready == 0 {
                 ready = cq.ready() as usize + 1;
             }
 
-            consume_cqe(cqe);
+            consume_cqe(cqe, &mut slab);
 
             ready -= 1;
         }
@@ -130,10 +158,8 @@ unsafe fn complete(mut cq: iou::CompletionQueue<'static>) {
     }
 }
 
-fn consume_cqe(cqe: CompletionQueueEvent) {
+fn consume_cqe(cqe: CompletionQueueEvent, slab: &mut Slab<Arc<Event>>) {
     let user_data = cqe.user_data() as usize;
-
-    let mut slab = get_slab().lock().unwrap();
 
     if !slab.contains(user_data) {
         return;
