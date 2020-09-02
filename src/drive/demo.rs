@@ -2,6 +2,7 @@ use std::io::Result;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use std::{ptr, thread};
 
 use futures_util::task::AtomicWaker;
@@ -16,7 +17,8 @@ use super::Drive;
 pub fn get_default_driver() -> DemoDriver {
     const SQ_ENTRIES: u32 = 1024;
 
-    static DRIVER: Lazy<DemoDriver> = Lazy::new(|| DemoDriver::new(SQ_ENTRIES).unwrap());
+    static DRIVER: Lazy<DemoDriver> =
+        Lazy::new(|| DemoDriver::new(SQ_ENTRIES, 64, Duration::from_millis(1)).unwrap());
 
     let driver = &*DRIVER;
 
@@ -26,13 +28,42 @@ pub fn get_default_driver() -> DemoDriver {
 #[derive(Clone)]
 pub struct DemoDriver {
     inner: Arc<InnerDriver>,
+    max_submit: usize,
 }
 
 impl DemoDriver {
-    pub fn new(entries: u32) -> Result<Self> {
-        Ok(DemoDriver {
-            inner: Arc::new(InnerDriver::new(entries)?),
-        })
+    pub fn new(
+        entries: u32,
+        max_submit: usize,
+        submit_interval: impl Into<Option<Duration>>,
+    ) -> Result<Self> {
+        let submit_interval = submit_interval.into();
+
+        let inner = Arc::new(InnerDriver::new(entries, submit_interval)?);
+
+        if let Some(submit_interval) = submit_interval {
+            let inner = inner.clone();
+
+            thread::spawn(move || loop {
+                thread::sleep(submit_interval);
+
+                let mut sq = inner.sq.lock().unwrap();
+
+                let (sq, submit_count) = &mut *sq;
+
+                let submit_count = submit_count.as_mut().expect("submit count is not set");
+
+                if *submit_count == 0 {
+                    continue;
+                }
+
+                *submit_count = 0;
+
+                let _ = sq.submit();
+            });
+        }
+
+        Ok(DemoDriver { inner, max_submit })
     }
 }
 
@@ -43,6 +74,7 @@ impl Drive for DemoDriver {
         prepare: impl FnOnce(&mut SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
     ) -> Poll<Result<Arc<Event>>> {
         let mut sq = self.inner.sq.lock().unwrap();
+        let (sq, submit_count) = &mut *sq;
 
         match sq.next_sqe() {
             None => {
@@ -58,6 +90,10 @@ impl Drive for DemoDriver {
 
                 sqe.set_user_data(user_data as _);
 
+                if let Some(submit_count) = submit_count {
+                    *submit_count += 1;
+                }
+
                 Poll::Ready(Ok(event))
             }
         }
@@ -66,25 +102,45 @@ impl Drive for DemoDriver {
     fn poll_submit(
         self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        _eager: bool,
+        eager: bool,
     ) -> Poll<Result<usize>> {
         let mut sq = self.inner.sq.lock().unwrap();
+        let (sq, submit_count) = &mut *sq;
 
-        // for now ignore eager
-        Poll::Ready(sq.submit())
+        if eager {
+            if let Some(submit_count) = submit_count {
+                *submit_count = 0;
+            }
+
+            return Poll::Ready(sq.submit());
+        }
+
+        if let Some(submit_count) = submit_count {
+            return if *submit_count >= self.max_submit {
+                *submit_count = 0;
+
+                Poll::Ready(sq.submit())
+            } else {
+                *submit_count += 1;
+
+                Poll::Ready(Ok(0))
+            };
+        }
+
+        Poll::Ready(Ok(0))
     }
 }
 
 struct InnerDriver {
     ring: *mut iou::IoUring,
-    sq: Mutex<SubmissionQueue<'static>>,
+    sq: Mutex<(SubmissionQueue<'static>, Option<usize>)>,
     _registrar: Registrar<'static>,
     waker: Arc<AtomicWaker>,
     slab: Arc<Mutex<Slab<Arc<Event>>>>,
 }
 
 impl InnerDriver {
-    fn new(entries: u32) -> Result<Self> {
+    fn new(entries: u32, submit_interval: Option<Duration>) -> Result<Self> {
         let ring_pointer = Box::into_raw(Box::new(iou::IoUring::new(entries)?));
 
         // Safety: ring is allocated on heap
@@ -92,7 +148,13 @@ impl InnerDriver {
 
         let (sq, cq, registrar) = ring_ref.queues();
 
-        let sq = Mutex::new(sq);
+        let submit_count = if submit_interval.is_some() {
+            Some(0)
+        } else {
+            None
+        };
+
+        let sq = Mutex::new((sq, submit_count));
 
         let waker = Arc::new(AtomicWaker::new());
         let slab = Arc::new(Mutex::new(Slab::with_capacity(entries as _)));
