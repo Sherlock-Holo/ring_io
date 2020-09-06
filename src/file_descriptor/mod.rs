@@ -3,6 +3,8 @@ use std::io::Error;
 use std::io::SeekFrom;
 use std::io::{Read, Result, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
@@ -19,7 +21,7 @@ use crate::fs::Open;
 pub(crate) mod buffer;
 
 pub struct FileDescriptor<D> {
-    fd: RawFd,
+    fd: Option<RawFd>,
     buf: Option<Buffer>,
     event: Arc<Event>,
     offset: Option<usize>,
@@ -29,7 +31,7 @@ pub struct FileDescriptor<D> {
 impl<D> FileDescriptor<D> {
     pub(crate) fn new(fd: RawFd, driver: D, offset: impl Into<Option<usize>>) -> Self {
         Self {
-            fd,
+            fd: Some(fd),
             buf: None,
             event: Arc::new(Event::Nothing),
             offset: offset.into(),
@@ -118,7 +120,7 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                     .unwrap_or_else(|| Buffer::new(BUFFER_SIZE));
 
                 let offset = this.offset.unwrap_or_else(|| 0);
-                let fd = this.fd;
+                let fd = this.fd.unwrap();
                 let waker = cx.waker().clone();
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
@@ -219,7 +221,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 buf.write_all(data).expect("fill data to buf failed");
 
-                let fd = this.fd;
+                let fd = this.fd.unwrap();
                 let offset = this.offset.unwrap_or_else(|| 0);
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
@@ -257,7 +259,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
         this.cancel();
 
-        let _ = nix::unistd::close(this.fd);
+        let _ = nix::unistd::close(this.fd.take().unwrap());
 
         Poll::Ready(Ok(()))
     }
@@ -293,10 +295,26 @@ impl<D: Drive + Unpin> AsyncSeek for FileDescriptor<D> {
     }
 }
 
+impl<D> AsRawFd for FileDescriptor<D> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.unwrap()
+    }
+}
+
+impl<D> IntoRawFd for FileDescriptor<D> {
+    fn into_raw_fd(mut self) -> RawFd {
+        self.cancel();
+
+        self.fd.take().unwrap()
+    }
+}
+
 impl<D> Drop for FileDescriptor<D> {
     fn drop(&mut self) {
         self.cancel();
 
-        let _ = nix::unistd::close(self.fd);
+        if let Some(fd) = self.fd.take() {
+            let _ = nix::unistd::close(fd);
+        }
     }
 }

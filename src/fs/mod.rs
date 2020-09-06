@@ -1,4 +1,8 @@
 use std::io::Result;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::FromRawFd;
+use std::os::unix::io::IntoRawFd;
+use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -84,6 +88,30 @@ impl<D: Drive + Unpin> AsyncSeek for File<D> {
         pos: SeekFrom,
     ) -> Poll<Result<u64>> {
         Pin::new(&mut self.fd).poll_seek(cx, pos)
+    }
+}
+
+impl<D> AsRawFd for File<D> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl<D> IntoRawFd for File<D> {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+
+impl FromRawFd for File<DemoDriver> {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        File::new(FileDescriptor::new(fd, drive::get_default_driver(), 0))
+    }
+}
+
+impl From<std::fs::File> for File<DemoDriver> {
+    fn from(std_file: std::fs::File) -> Self {
+        unsafe { Self::from_raw_fd(std_file.into_raw_fd()) }
     }
 }
 

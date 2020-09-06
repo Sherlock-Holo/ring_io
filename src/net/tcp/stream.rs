@@ -1,6 +1,9 @@
 use std::future::Future;
 use std::io::Result;
 use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::io::FromRawFd;
+use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -13,18 +16,16 @@ use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
 use crate::drive::{self, ConnectEvent, DemoDriver, Drive, Event};
 use crate::file_descriptor::FileDescriptor;
+use crate::from_nix_err;
 
 pub struct TcpStream<D> {
     fd: FileDescriptor<D>,
-    // local_addr: SocketAddr,
-    peer_addr: SocketAddr,
 }
 
 impl<D> TcpStream<D> {
-    fn new(fd: RawFd, remote_addr: SocketAddr, driver: D) -> Self {
+    fn new(fd: RawFd, driver: D) -> Self {
         Self {
             fd: FileDescriptor::new(fd, driver, None),
-            peer_addr: remote_addr,
         }
     }
 
@@ -32,18 +33,43 @@ impl<D> TcpStream<D> {
         Connect::new_with_driver(addr, driver)
     }
 
+    #[inline]
     pub fn peer_addr(&self) -> Result<SocketAddr> {
-        Ok(self.peer_addr)
+        self.get_addr(false)
+    }
+
+    #[inline]
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.get_addr(true)
+    }
+
+    fn get_addr(&self, is_local: bool) -> Result<SocketAddr> {
+        let nix_addr = if is_local {
+            socket::getsockname(self.fd.as_raw_fd()).map_err(from_nix_err)?
+        } else {
+            socket::getpeername(self.fd.as_raw_fd()).map_err(from_nix_err)?
+        };
+
+        match nix_addr {
+            nix::sys::socket::SockAddr::Inet(inet_addr) => Ok(inet_addr.to_std()),
+
+            addr => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid sock addr family {:?}", addr.family()),
+            )),
+        }
     }
 }
 
 impl TcpStream<DemoDriver> {
+    #[inline]
     pub fn connect(addr: SocketAddr) -> Connect<DemoDriver> {
         Connect::new_with_driver(addr, drive::get_default_driver())
     }
 }
 
 impl<D: Drive + Unpin> AsyncRead for TcpStream<D> {
+    #[inline]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -54,16 +80,19 @@ impl<D: Drive + Unpin> AsyncRead for TcpStream<D> {
 }
 
 impl<D: Drive + Unpin> AsyncBufRead for TcpStream<D> {
+    #[inline]
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8]>> {
         Pin::new(&mut self.get_mut().fd).poll_fill_buf(cx)
     }
 
+    #[inline]
     fn consume(mut self: Pin<&mut Self>, amt: usize) {
         Pin::new(&mut self.fd).consume(amt)
     }
 }
 
 impl<D: Drive + Unpin> AsyncWrite for TcpStream<D> {
+    #[inline]
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -72,12 +101,38 @@ impl<D: Drive + Unpin> AsyncWrite for TcpStream<D> {
         Pin::new(&mut self.fd).poll_write(cx, buf)
     }
 
+    #[inline]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.fd).poll_flush(cx)
     }
 
+    #[inline]
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.fd).poll_close(cx)
+    }
+}
+
+impl<D> AsRawFd for TcpStream<D> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl<D> IntoRawFd for TcpStream<D> {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+
+impl FromRawFd for TcpStream<DemoDriver> {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        TcpStream::new(fd, drive::get_default_driver())
+    }
+}
+
+impl From<std::net::TcpStream> for TcpStream<DemoDriver> {
+    fn from(std_tcp_stream: std::net::TcpStream) -> Self {
+        unsafe { Self::from_raw_fd(std_tcp_stream.into_raw_fd()) }
     }
 }
 
@@ -123,7 +178,7 @@ impl<D: Drive + Unpin> Future for Connect<D> {
                         return match err.as_errno() {
                             Some(errno) => Poll::Ready(Err(errno.into())),
                             None => Poll::Ready(Err(Error::new(ErrorKind::Other, err))),
-                        }
+                        };
                     }
 
                     Ok(fd) => fd,
@@ -174,7 +229,6 @@ impl<D: Drive + Unpin> Future for Connect<D> {
 
                         Poll::Ready(Ok(TcpStream::new(
                             connect_event.fd,
-                            this.addr,
                             this.driver.take().unwrap(),
                         )))
                     }
