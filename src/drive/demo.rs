@@ -49,15 +49,15 @@ impl DemoDriver {
 
                 let mut sq = inner.sq.lock().unwrap();
 
-                let (sq, submit_count) = &mut *sq;
+                let (sq, prepare_count) = &mut *sq;
 
-                let submit_count = submit_count.as_mut().expect("submit count is not set");
+                let prepare_count = prepare_count.as_mut().expect("submit count is not set");
 
-                if *submit_count == 0 {
+                if *prepare_count == 0 {
                     continue;
                 }
 
-                *submit_count = 0;
+                *prepare_count = 0;
 
                 let _ = sq.submit();
             });
@@ -74,7 +74,7 @@ impl Drive for DemoDriver {
         prepare: impl FnOnce(&mut SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
     ) -> Poll<Result<Arc<Event>>> {
         let mut sq = self.inner.sq.lock().unwrap();
-        let (sq, submit_count) = &mut *sq;
+        let (sq, prepare_count) = &mut *sq;
 
         match sq.next_sqe() {
             None => {
@@ -90,8 +90,8 @@ impl Drive for DemoDriver {
 
                 sqe.set_user_data(user_data as _);
 
-                if let Some(submit_count) = submit_count {
-                    *submit_count += 1;
+                if let Some(prepare_count) = prepare_count {
+                    *prepare_count += 1;
                 }
 
                 Poll::Ready(Ok(event))
@@ -105,29 +105,27 @@ impl Drive for DemoDriver {
         eager: bool,
     ) -> Poll<Result<usize>> {
         let mut sq = self.inner.sq.lock().unwrap();
-        let (sq, submit_count) = &mut *sq;
+        let (sq, prepare_count) = &mut *sq;
 
         if eager {
-            if let Some(submit_count) = submit_count {
-                *submit_count = 0;
+            if let Some(prepare_count) = prepare_count {
+                *prepare_count = 0;
             }
 
             return Poll::Ready(sq.submit());
         }
 
-        if let Some(submit_count) = submit_count {
-            return if *submit_count >= self.max_submit {
-                *submit_count = 0;
+        if let Some(prepare_count) = prepare_count {
+            if *prepare_count >= self.max_submit {
+                *prepare_count = 0;
 
                 Poll::Ready(sq.submit())
             } else {
-                *submit_count += 1;
-
                 Poll::Ready(Ok(0))
-            };
+            }
+        } else {
+            Poll::Ready(Ok(0))
         }
-
-        Poll::Ready(Ok(0))
     }
 }
 
@@ -148,13 +146,13 @@ impl InnerDriver {
 
         let (sq, cq, registrar) = ring_ref.queues();
 
-        let submit_count = if submit_interval.is_some() {
+        let prepare_count = if submit_interval.is_some() {
             Some(0)
         } else {
             None
         };
 
-        let sq = Mutex::new((sq, submit_count));
+        let sq = Mutex::new((sq, prepare_count));
 
         let waker = Arc::new(AtomicWaker::new());
         let slab = Arc::new(Mutex::new(Slab::with_capacity(entries as _)));

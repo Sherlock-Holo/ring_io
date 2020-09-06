@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 
 use futures_util::task::AtomicWaker;
@@ -13,6 +14,8 @@ pub enum Event {
     Write(Mutex<WriteEvent>),
 
     Open(Mutex<OpenEvent>),
+
+    Connect(Mutex<ConnectEvent>),
 }
 
 impl Event {
@@ -20,15 +23,11 @@ impl Event {
         match self {
             Event::Nothing | Event::Read(_) | Event::Write(_) => {}
             Event::Open(open_event) => {
-                let mut open_event = open_event.lock().unwrap();
+                open_event.lock().unwrap().cancel = true;
+            }
 
-                open_event.cancel = true;
-
-                if let Some(Ok(fd)) = open_event.result.take() {
-                    unsafe {
-                        libc::close(fd as i32);
-                    }
-                }
+            Event::Connect(connect_event) => {
+                connect_event.lock().unwrap().cancel = true;
             }
         }
     }
@@ -37,6 +36,7 @@ impl Event {
         match self {
             Event::Nothing | Event::Read(_) | Event::Write(_) => false,
             Event::Open(open_event) => open_event.lock().unwrap().cancel,
+            Event::Connect(connect_event) => connect_event.lock().unwrap().cancel,
         }
     }
 
@@ -66,6 +66,14 @@ impl Event {
                 open_event.result.replace(result);
 
                 open_event.waker.wake();
+            }
+
+            Event::Connect(connect_event) => {
+                let mut connect_event = connect_event.lock().unwrap();
+
+                connect_event.result.replace(Ok(()));
+
+                connect_event.waker.wake();
             }
         }
     }
@@ -116,6 +124,42 @@ impl OpenEvent {
             waker: Default::default(),
             result: None,
             cancel: false,
+        }
+    }
+}
+
+impl Drop for OpenEvent {
+    fn drop(&mut self) {
+        if self.cancel {
+            if let Some(Ok(fd)) = self.result.take() {
+                let _ = nix::unistd::close(fd as _);
+            }
+        }
+    }
+}
+
+pub struct ConnectEvent {
+    pub waker: AtomicWaker,
+    pub result: Option<io::Result<()>>,
+    pub fd: RawFd,
+    cancel: bool,
+}
+
+impl ConnectEvent {
+    pub fn new(fd: RawFd) -> Self {
+        Self {
+            waker: Default::default(),
+            result: None,
+            fd,
+            cancel: false,
+        }
+    }
+}
+
+impl Drop for ConnectEvent {
+    fn drop(&mut self) {
+        if self.cancel {
+            let _ = nix::unistd::close(self.fd as _);
         }
     }
 }

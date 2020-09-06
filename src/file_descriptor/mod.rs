@@ -257,9 +257,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
         this.cancel();
 
-        unsafe {
-            libc::close(this.fd);
-        }
+        let _ = nix::unistd::close(this.fd);
 
         Poll::Ready(Ok(()))
     }
@@ -299,8 +297,6 @@ impl<D> Drop for FileDescriptor<D> {
     fn drop(&mut self) {
         self.cancel();
 
-        unsafe {
-            libc::close(self.fd);
-        }
+        let _ = nix::unistd::close(self.fd);
     }
 }

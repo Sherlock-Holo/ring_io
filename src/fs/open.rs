@@ -21,11 +21,12 @@ pub struct Open<D: Drive> {
     flags: c_int,
     mode: mode_t,
     driver: Option<D>,
+    finish: bool,
 }
 
 impl<D: Drive> Open<D> {
     pub(crate) fn new_read_only(path: CString, driver: D) -> Self {
-        Self::new(path, libc::O_RDONLY, 0o644, driver)
+        Self::new(path, libc::O_RDONLY | libc::O_CLOEXEC, 0o644, driver)
     }
 
     fn new(path: CString, flags: c_int, mode: mode_t, driver: D) -> Self {
@@ -35,6 +36,7 @@ impl<D: Drive> Open<D> {
             flags,
             mode,
             driver: Some(driver),
+            finish: false,
         }
     }
 }
@@ -59,6 +61,8 @@ impl<D: Drive + Unpin> Future for Open<D> {
                     Poll::Pending
                 } else {
                     let fd = open_event.result.take().unwrap()?;
+
+                    this.finish = true;
 
                     Poll::Ready(Ok(File::new(FileDescriptor::new(
                         fd as _,
@@ -94,7 +98,9 @@ impl<D: Drive + Unpin> Future for Open<D> {
 
                 this.event = event;
 
-                futures_util::ready!(Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, true))?;
+                futures_util::ready!(
+                    Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, false)
+                )?;
 
                 Poll::Pending
             }
@@ -106,7 +112,9 @@ impl<D: Drive + Unpin> Future for Open<D> {
 
 impl<D: Drive> Drop for Open<D> {
     fn drop(&mut self) {
-        self.event.cancel();
+        if !self.finish {
+            self.event.cancel();
+        }
     }
 }
 

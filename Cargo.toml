@@ -15,6 +15,7 @@ iou = "0.0.0-ringbahn.1"
 slab = "0.4"
 bytes = "0.5"
 uring-sys = "0.6"
+nix = "0.18"
 
 [dev-dependencies]
 tempfile = "3.1"
