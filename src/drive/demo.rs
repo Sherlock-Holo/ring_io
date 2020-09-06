@@ -196,25 +196,13 @@ fn complete(
 
         waker.wake();
 
-        let mut ready = cq.ready() as usize + 1;
-
         consume_cqe(cqe, &mut slab);
-
-        ready -= 1;
 
         while let Some(cqe) = cq.peek_for_cqe() {
             waker.wake();
 
-            if ready == 0 {
-                ready = cq.ready() as usize + 1;
-            }
-
             consume_cqe(cqe, &mut slab);
-
-            ready -= 1;
         }
-
-        debug_assert!(ready == 0);
     }
 }
 

@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
-use iou::InetAddr;
+use futures_util::io::{Error, ErrorKind};
+use nix::sys::socket;
+use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
 use crate::drive::{self, ConnectEvent, DemoDriver, Drive, Event};
 use crate::file_descriptor::FileDescriptor;
-use crate::net::socket;
 
 pub struct TcpStream<D> {
     fd: FileDescriptor<D>,
@@ -106,20 +107,37 @@ impl<D: Drive + Unpin> Future for Connect<D> {
 
         match &*this.event {
             Event::Nothing => {
-                let (fd, addr) = socket::socket(this.addr)?;
+                let address_family = if this.addr.is_ipv4() {
+                    AddressFamily::Inet
+                } else {
+                    AddressFamily::Inet6
+                };
 
-                this.addr = addr;
+                let fd = match socket::socket(
+                    address_family,
+                    SockType::Stream,
+                    SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+                    SockProtocol::Tcp,
+                ) {
+                    Err(err) => {
+                        return match err.as_errno() {
+                            Some(errno) => Poll::Ready(Err(errno.into())),
+                            None => Poll::Ready(Err(Error::new(ErrorKind::Other, err))),
+                        }
+                    }
+
+                    Ok(fd) => fd,
+                };
+
+                let addr = this.addr;
 
                 let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
                     .poll_prepare(cx, |sqe, cx| {
-                        unsafe {
-                            sqe.prep_connect(
-                                fd,
-                                &iou::SockAddr::new_inet(InetAddr::from_std(&addr)),
-                            );
-                        }
+                        let connect_event = ConnectEvent::new(fd, &addr);
 
-                        let connect_event = ConnectEvent::new(fd);
+                        unsafe {
+                            sqe.prep_connect(fd, &connect_event.addr);
+                        }
 
                         connect_event.waker.register(cx.waker());
 

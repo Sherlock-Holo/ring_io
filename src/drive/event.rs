@@ -1,4 +1,5 @@
 use std::io;
+use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
 use std::sync::Mutex;
 
@@ -71,7 +72,7 @@ impl Event {
             Event::Connect(connect_event) => {
                 let mut connect_event = connect_event.lock().unwrap();
 
-                connect_event.result.replace(Ok(()));
+                connect_event.result.replace(result.map(|_| ()));
 
                 connect_event.waker.wake();
             }
@@ -142,15 +143,17 @@ pub struct ConnectEvent {
     pub waker: AtomicWaker,
     pub result: Option<io::Result<()>>,
     pub fd: RawFd,
+    pub addr: Box<iou::SockAddr>,
     cancel: bool,
 }
 
 impl ConnectEvent {
-    pub fn new(fd: RawFd) -> Self {
+    pub fn new(fd: RawFd, addr: &SocketAddr) -> Self {
         Self {
             waker: Default::default(),
             result: None,
             fd,
+            addr: Box::new(iou::SockAddr::Inet(iou::InetAddr::from_std(addr))),
             cancel: false,
         }
     }
