@@ -87,14 +87,6 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                         }
 
                         Ok(result) => {
-                            if result == 0 {
-                                drop(read_event);
-
-                                this.cancel();
-
-                                return Pin::new(this).poll_fill_buf(cx);
-                            }
-
                             read_event.result.replace(Ok(result));
 
                             if this.buf.is_none() {
@@ -119,7 +111,7 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                     })
                     .unwrap_or_else(|| Buffer::new(BUFFER_SIZE));
 
-                let offset = this.offset.unwrap_or_else(|| 0);
+                let offset = this.offset.unwrap_or(0);
                 let fd = this.fd.unwrap();
                 let waker = cx.waker().clone();
 
@@ -165,7 +157,13 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                     buf.advance(amt);
                 }
 
-                read_event.result.replace(Ok(result));
+                if result > 0 {
+                    read_event.result.replace(Ok(result));
+                } else {
+                    drop(read_event);
+
+                    this.event = Arc::new(Event::Nothing);
+                }
             }
         }
     }
@@ -222,7 +220,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
                 buf.write_all(data).expect("fill data to buf failed");
 
                 let fd = this.fd.unwrap();
-                let offset = this.offset.unwrap_or_else(|| 0);
+                let offset = this.offset.unwrap_or(0);
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,

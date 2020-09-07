@@ -327,4 +327,21 @@ mod tests {
             assert_eq!(stream2.read(&mut [0; 10]).unwrap(), 0);
         })
     }
+
+    #[test]
+    fn test_tcp_stream_read_zero() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+
+        let addr = listener.local_addr().unwrap();
+
+        futures_executor::block_on(async {
+            let mut stream1 = TcpStream::connect(addr).await.unwrap();
+
+            let (stream2, _) = listener.accept().unwrap();
+
+            drop(stream2);
+
+            assert_eq!(stream1.read(&mut [0; 10]).await.unwrap(), 0);
+        })
+    }
 }
