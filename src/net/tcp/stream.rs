@@ -15,8 +15,8 @@ use nix::sys::socket;
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
 use crate::drive::{self, ConnectEvent, DemoDriver, Drive, Event};
-use crate::file_descriptor::FileDescriptor;
 use crate::from_nix_err;
+use crate::io::FileDescriptor;
 
 pub struct TcpStream<D> {
     fd: FileDescriptor<D>,

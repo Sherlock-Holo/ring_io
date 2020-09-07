@@ -14,13 +14,16 @@ use std::task::{Context, Poll};
 use bytes::Buf;
 use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 
+pub use read_half::*;
+
 use crate::drive::{Drive, Event, ReadEvent, WriteEvent};
-use crate::file_descriptor::buffer::Buffer;
 use crate::fs::Open;
+use crate::io::buffer::Buffer;
 
 pub(crate) mod buffer;
+mod read_half;
 
-pub struct FileDescriptor<D> {
+pub(crate) struct FileDescriptor<D> {
     fd: Option<RawFd>,
     buf: Option<Buffer>,
     event: Arc<Event>,

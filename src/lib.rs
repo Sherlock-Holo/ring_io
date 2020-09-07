@@ -2,8 +2,8 @@ use std::io::Error;
 use std::io::ErrorKind;
 
 pub mod drive;
-mod file_descriptor;
 pub mod fs;
+pub mod io;
 pub mod net;
 mod ring;
 

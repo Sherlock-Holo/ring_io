@@ -12,8 +12,8 @@ use std::task::{Context, Poll};
 use libc::{c_int, mode_t};
 
 use crate::drive::{self, DemoDriver, Drive, Event, OpenEvent};
-use crate::file_descriptor::FileDescriptor;
 use crate::fs::File;
+use crate::io::FileDescriptor;
 
 pub struct Open<D: Drive> {
     path: CString,

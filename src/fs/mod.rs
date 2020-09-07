@@ -13,7 +13,7 @@ use futures_util::io::SeekFrom;
 pub use open::*;
 
 use crate::drive::{self, DemoDriver, Drive};
-use crate::file_descriptor::FileDescriptor;
+use crate::io::FileDescriptor;
 
 mod metadata;
 mod open;
