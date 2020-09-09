@@ -8,6 +8,7 @@ use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -15,6 +16,7 @@ use bytes::Buf;
 use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 
 pub use read_half::*;
+pub use write_half::*;
 
 use crate::drive::{Drive, Event, ReadEvent, WriteEvent};
 use crate::fs::Open;
@@ -22,9 +24,17 @@ use crate::io::buffer::Buffer;
 
 pub(crate) mod buffer;
 mod read_half;
+mod write_half;
+
+#[derive(Debug, Clone)]
+enum RawFdState {
+    Closed,
+    Opened(RawFd),
+    Shared(RawFd, Arc<AtomicU8>),
+}
 
 pub(crate) struct FileDescriptor<D> {
-    fd: Option<RawFd>,
+    fd: RawFdState,
     buf: Option<Buffer>,
     event: Arc<Event>,
     offset: Option<usize>,
@@ -34,7 +44,7 @@ pub(crate) struct FileDescriptor<D> {
 impl<D> FileDescriptor<D> {
     pub(crate) fn new(fd: RawFd, driver: D, offset: impl Into<Option<usize>>) -> Self {
         Self {
-            fd: Some(fd),
+            fd: RawFdState::Opened(fd),
             buf: None,
             event: Arc::new(Event::Nothing),
             offset: offset.into(),
@@ -50,6 +60,75 @@ impl<D> FileDescriptor<D> {
         self.event.cancel();
 
         self.event = Arc::new(Event::Nothing);
+    }
+
+    pub fn merge(&mut self, other: &mut Self) -> std::result::Result<(), ()> {
+        match &self.fd {
+            RawFdState::Shared(fd1, _) => {
+                if let RawFdState::Shared(fd2, _) = &other.fd {
+                    if *fd1 != *fd2 {
+                        return Err(());
+                    }
+                } else {
+                    return Err(());
+                }
+
+                let fd = *fd1;
+
+                self.cancel();
+                other.cancel();
+
+                self.fd = RawFdState::Opened(fd);
+
+                Ok(())
+            }
+
+            _ => Err(()),
+        }
+    }
+}
+
+impl<D: Clone> FileDescriptor<D> {
+    pub fn split(mut self) -> (Self, Self) {
+        match self.fd {
+            RawFdState::Opened(fd) => {
+                let fd1 = RawFdState::Shared(fd, Arc::new(AtomicU8::new(2)));
+                let fd2 = fd1.clone();
+
+                self.fd = fd1;
+                let offset = self.offset;
+                let driver = self.driver.clone();
+
+                (
+                    self,
+                    Self {
+                        fd: fd2,
+                        buf: None,
+                        event: Arc::new(Event::Nothing),
+                        offset,
+                        driver,
+                    },
+                )
+            }
+
+            RawFdState::Closed => {
+                let offset = self.offset;
+                let driver = self.driver.clone();
+
+                (
+                    self,
+                    Self {
+                        fd: RawFdState::Closed,
+                        buf: None,
+                        event: Arc::new(Event::Nothing),
+                        offset,
+                        driver,
+                    },
+                )
+            }
+
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -115,7 +194,15 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                     .unwrap_or_else(|| Buffer::new(BUFFER_SIZE));
 
                 let offset = this.offset.unwrap_or(0);
-                let fd = this.fd.unwrap();
+
+                let fd = match &this.fd {
+                    RawFdState::Opened(fd) => *fd,
+                    RawFdState::Shared(fd, _) => *fd,
+                    RawFdState::Closed => {
+                        return Poll::Ready(Err(Error::from_raw_os_error(libc::EBADFD)));
+                    }
+                };
+
                 let waker = cx.waker().clone();
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
@@ -222,7 +309,14 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 buf.write_all(data).expect("fill data to buf failed");
 
-                let fd = this.fd.unwrap();
+                let fd = match &this.fd {
+                    RawFdState::Opened(fd) => *fd,
+                    RawFdState::Shared(fd, _) => *fd,
+                    RawFdState::Closed => {
+                        return Poll::Ready(Err(Error::from_raw_os_error(libc::EBADFD)));
+                    }
+                };
+
                 let offset = this.offset.unwrap_or(0);
 
                 let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
@@ -260,9 +354,27 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
         this.cancel();
 
-        let _ = nix::unistd::close(this.fd.take().unwrap());
+        match &this.fd {
+            RawFdState::Closed => Poll::Ready(Ok(())),
 
-        Poll::Ready(Ok(()))
+            RawFdState::Opened(fd) => {
+                let _ = nix::unistd::close(*fd);
+
+                this.fd = RawFdState::Closed;
+
+                Poll::Ready(Ok(()))
+            }
+
+            RawFdState::Shared(fd, count) => {
+                if count.fetch_sub(1, Ordering::Relaxed) - 1 == 0 {
+                    let _ = nix::unistd::close(*fd);
+                }
+
+                this.fd = RawFdState::Closed;
+
+                Poll::Ready(Ok(()))
+            }
+        }
     }
 }
 
@@ -298,7 +410,11 @@ impl<D: Drive + Unpin> AsyncSeek for FileDescriptor<D> {
 
 impl<D> AsRawFd for FileDescriptor<D> {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd.unwrap()
+        match &self.fd {
+            RawFdState::Opened(fd) => *fd,
+            RawFdState::Closed => -1,
+            RawFdState::Shared(..) => unreachable!(),
+        }
     }
 }
 
@@ -306,7 +422,11 @@ impl<D> IntoRawFd for FileDescriptor<D> {
     fn into_raw_fd(mut self) -> RawFd {
         self.cancel();
 
-        self.fd.take().unwrap()
+        match self.fd {
+            RawFdState::Opened(fd) => fd,
+            RawFdState::Closed => -1,
+            RawFdState::Shared(..) => unreachable!(),
+        }
     }
 }
 
@@ -314,8 +434,16 @@ impl<D> Drop for FileDescriptor<D> {
     fn drop(&mut self) {
         self.cancel();
 
-        if let Some(fd) = self.fd.take() {
-            let _ = nix::unistd::close(fd);
+        match &self.fd {
+            RawFdState::Opened(fd) => {
+                let _ = nix::unistd::close(*fd);
+            }
+            RawFdState::Closed => {}
+            RawFdState::Shared(fd, count) => {
+                if count.fetch_sub(1, Ordering::Relaxed) - 1 == 0 {
+                    let _ = nix::unistd::close(*fd);
+                }
+            }
         }
     }
 }

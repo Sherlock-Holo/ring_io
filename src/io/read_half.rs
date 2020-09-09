@@ -1,41 +1,46 @@
 use std::io::Result;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures_io::AsyncRead;
-use futures_util::lock::BiLock;
+use futures_io::{AsyncBufRead, AsyncRead};
 
 use crate::drive::Drive;
 use crate::io::FileDescriptor;
 
-pub struct ReadHalf<'a, D> {
-    fd: BiLock<&'a mut FileDescriptor<D>>,
+pub struct ReadHalf<D, T> {
+    pub(crate) fd: FileDescriptor<D>,
+    _marker: PhantomData<T>,
 }
 
-impl<D: Drive + Unpin> AsyncRead for ReadHalf<'_, D> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Result<usize>> {
-        futures_util::ready!(self.fd.poll_lock(cx))
-            .as_pin_mut()
-            .poll_read(cx, buf)
+impl<D, T> ReadHalf<D, T> {
+    pub(crate) fn new(fd: FileDescriptor<D>) -> Self {
+        Self {
+            fd,
+            _marker: Default::default(),
+        }
     }
 }
 
-pub struct OwnedReadHalf<D> {
-    fd: BiLock<FileDescriptor<D>>,
-}
-
-impl<D: Drive + Unpin> AsyncRead for OwnedReadHalf<D> {
+impl<D: Drive + Unpin, T: Unpin> AsyncRead for ReadHalf<D, T> {
+    #[inline]
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<usize>> {
-        futures_util::ready!(self.fd.poll_lock(cx))
-            .as_pin_mut()
-            .poll_read(cx, buf)
+        Pin::new(&mut self.fd).poll_read(cx, buf)
+    }
+}
+
+impl<D: Drive + Unpin, T: Unpin> AsyncBufRead for ReadHalf<D, T> {
+    #[inline]
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8]>> {
+        Pin::new(&mut self.get_mut().fd).poll_fill_buf(cx)
+    }
+
+    #[inline]
+    fn consume(mut self: Pin<&mut Self>, amt: usize) {
+        Pin::new(&mut self.fd).consume(amt)
     }
 }

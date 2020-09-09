@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io::Result;
+use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::FromRawFd;
@@ -10,13 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
-use futures_util::io::{Error, ErrorKind};
 use nix::sys::socket;
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
 use crate::drive::{self, ConnectEvent, DemoDriver, Drive, Event};
 use crate::from_nix_err;
-use crate::io::FileDescriptor;
+use crate::io::{FileDescriptor, ReadHalf, WriteHalf};
+
+type MergeResult<D, T> = std::result::Result<T, (ReadHalf<D, T>, WriteHalf<D, T>)>;
 
 pub struct TcpStream<D> {
     fd: FileDescriptor<D>,
@@ -58,6 +60,25 @@ impl<D> TcpStream<D> {
                 format!("invalid sock addr family {:?}", addr.family()),
             )),
         }
+    }
+
+    pub fn merge(
+        mut read_half: ReadHalf<D, Self>,
+        mut write_half: WriteHalf<D, Self>,
+    ) -> MergeResult<D, Self> {
+        if read_half.fd.merge(&mut write_half.fd).is_err() {
+            Err((read_half, write_half))
+        } else {
+            Ok(Self { fd: read_half.fd })
+        }
+    }
+}
+
+impl<D: Clone> TcpStream<D> {
+    pub fn split(self) -> (ReadHalf<D, Self>, WriteHalf<D, Self>) {
+        let (fd_r, fd_w) = self.fd.split();
+
+        (ReadHalf::new(fd_r), WriteHalf::new(fd_w))
     }
 }
 
@@ -342,6 +363,56 @@ mod tests {
             drop(stream2);
 
             assert_eq!(stream1.read(&mut [0; 10]).await.unwrap(), 0);
+        })
+    }
+
+    #[test]
+    fn test_tcp_stream_split() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+
+        let addr = listener.local_addr().unwrap();
+
+        futures_executor::block_on(async {
+            let stream1 = TcpStream::connect(addr).await.unwrap();
+
+            let (mut stream2, _) = listener.accept().unwrap();
+
+            let (mut read, mut write) = stream1.split();
+
+            write.write_all(b"test").await.unwrap();
+
+            let mut buf = vec![0; 4];
+
+            stream2.read_exact(&mut buf).unwrap();
+
+            assert_eq!(buf, b"test");
+
+            stream2.write_all(b"abcd").unwrap();
+
+            read.read_exact(&mut buf).await.unwrap();
+
+            assert_eq!(buf, b"abcd");
+        })
+    }
+
+    #[test]
+    fn test_tcp_stream_merge() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+
+        let addr = listener.local_addr().unwrap();
+
+        futures_executor::block_on(async {
+            let stream1 = TcpStream::connect(addr).await.unwrap();
+
+            let (mut stream2, _) = listener.accept().unwrap();
+
+            let (read, write) = stream1.split();
+
+            let stream1 = TcpStream::merge(read, write).unwrap_or_else(|_| panic!("merge failed"));
+
+            drop(stream1);
+
+            assert_eq!(stream2.read(&mut [0]).unwrap(), 0);
         })
     }
 }

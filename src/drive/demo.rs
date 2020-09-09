@@ -18,7 +18,7 @@ pub fn get_default_driver() -> DemoDriver {
     const SQ_ENTRIES: u32 = 1024;
 
     static DRIVER: Lazy<DemoDriver> =
-        Lazy::new(|| DemoDriver::new(SQ_ENTRIES, 64, Duration::from_millis(1)).unwrap());
+        Lazy::new(|| DemoDriver::new(SQ_ENTRIES, 64, Duration::from_micros(100)).unwrap());
 
     let driver = &*DRIVER;
 
