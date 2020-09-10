@@ -1,2 +1,3 @@
 # ring_io
-a io_uring io library, expand ust std File, TcpStream etc, which implement AsRawFd
+
+an async io library, based on io_uring
