@@ -17,6 +17,8 @@ pub enum Event {
     Open(Mutex<OpenEvent>),
 
     Connect(Mutex<ConnectEvent>),
+
+    Accept(Mutex<AcceptEvent>),
 }
 
 impl Event {
@@ -30,6 +32,10 @@ impl Event {
             Event::Connect(connect_event) => {
                 connect_event.lock().unwrap().cancel = true;
             }
+
+            Event::Accept(accept_event) => {
+                accept_event.lock().unwrap().cancel = true;
+            }
         }
     }
 
@@ -38,6 +44,7 @@ impl Event {
             Event::Nothing | Event::Read(_) | Event::Write(_) => false,
             Event::Open(open_event) => open_event.lock().unwrap().cancel,
             Event::Connect(connect_event) => connect_event.lock().unwrap().cancel,
+            Event::Accept(accept_event) => accept_event.lock().unwrap().cancel,
         }
     }
 
@@ -75,6 +82,14 @@ impl Event {
                 connect_event.result.replace(result.map(|_| ()));
 
                 connect_event.waker.wake();
+            }
+
+            Event::Accept(accept_event) => {
+                let mut accept_event = accept_event.lock().unwrap();
+
+                accept_event.result.replace(result);
+
+                accept_event.waker.wake();
             }
         }
     }
@@ -163,6 +178,33 @@ impl Drop for ConnectEvent {
     fn drop(&mut self) {
         if self.cancel {
             let _ = nix::unistd::close(self.fd as _);
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AcceptEvent {
+    pub waker: AtomicWaker,
+    pub result: Option<io::Result<usize>>,
+    cancel: bool,
+}
+
+impl AcceptEvent {
+    pub fn new() -> Self {
+        Self {
+            waker: Default::default(),
+            result: None,
+            cancel: false,
+        }
+    }
+}
+
+impl Drop for AcceptEvent {
+    fn drop(&mut self) {
+        if self.cancel {
+            if let Some(Ok(fd)) = self.result {
+                let _ = nix::unistd::close(fd as _);
+            }
         }
     }
 }

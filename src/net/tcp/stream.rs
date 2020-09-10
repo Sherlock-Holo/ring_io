@@ -25,7 +25,7 @@ pub struct TcpStream<D> {
 }
 
 impl<D> TcpStream<D> {
-    fn new(fd: RawFd, driver: D) -> Self {
+    pub(crate) fn new(fd: RawFd, driver: D) -> Self {
         Self {
             fd: FileDescriptor::new(fd, driver, None),
         }

@@ -1,7 +1,9 @@
 use std::ffi::CString;
 use std::io::Error;
+use std::io::ErrorKind;
 use std::io::SeekFrom;
 use std::io::{Read, Result, Write};
+use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::IntoRawFd;
@@ -14,13 +16,16 @@ use std::task::{Context, Poll};
 
 use bytes::Buf;
 use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
+use nix::sys::socket;
 
 pub use read_half::*;
 pub use write_half::*;
 
-use crate::drive::{Drive, Event, ReadEvent, WriteEvent};
+use crate::drive::{AcceptEvent, Drive, Event, ReadEvent, WriteEvent};
+use crate::from_nix_err;
 use crate::fs::Open;
 use crate::io::buffer::Buffer;
+use crate::net::TcpStream;
 
 pub(crate) mod buffer;
 mod read_half;
@@ -86,6 +91,14 @@ impl<D> FileDescriptor<D> {
             _ => Err(()),
         }
     }
+
+    fn get_fd(&self) -> Result<RawFd> {
+        match &self.fd {
+            RawFdState::Opened(fd) => Ok(*fd),
+            RawFdState::Shared(fd, _) => Ok(*fd),
+            RawFdState::Closed => Err(Error::from_raw_os_error(libc::EBADFD)),
+        }
+    }
 }
 
 impl<D: Clone> FileDescriptor<D> {
@@ -137,6 +150,74 @@ impl<D: Drive> FileDescriptor<D> {
         let c_path = CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
 
         Open::new_read_only(c_path, driver)
+    }
+}
+
+impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
+    pub fn poll_accept(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(TcpStream<D>, SocketAddr)>> {
+        let this = self.get_mut();
+
+        match &*this.event {
+            Event::Accept(accept_event) => {
+                let mut accept_event = accept_event.lock().unwrap();
+
+                match accept_event.result.take() {
+                    Some(result) => {
+                        let fd = result?;
+
+                        let addr = match socket::getsockname(fd as _).map_err(from_nix_err)? {
+                            socket::SockAddr::Inet(inet_addr) => inet_addr.to_std(),
+                            addr => {
+                                return Poll::Ready(Err(Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("invalid addr {:?}", addr),
+                                )))
+                            }
+                        };
+
+                        Poll::Ready(Ok((TcpStream::new(fd as _, this.driver.clone()), addr)))
+                    }
+
+                    None => {
+                        accept_event.waker.register(cx.waker());
+
+                        Poll::Pending
+                    }
+                }
+            }
+
+            _ => {
+                this.cancel();
+
+                let fd = this.get_fd()?;
+
+                let waker = cx.waker().clone();
+
+                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                    cx,
+                    |sqe, _cx| {
+                        unsafe {
+                            sqe.prep_accept(fd, None, iou::SockFlag::SOCK_NONBLOCK);
+                        }
+
+                        let accept_event = AcceptEvent::new();
+
+                        accept_event.waker.register(&waker);
+
+                        Arc::new(Event::Accept(Mutex::new(accept_event)))
+                    }
+                ))?;
+
+                this.event = event;
+
+                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
+
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -195,13 +276,7 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
 
                 let offset = this.offset.unwrap_or(0);
 
-                let fd = match &this.fd {
-                    RawFdState::Opened(fd) => *fd,
-                    RawFdState::Shared(fd, _) => *fd,
-                    RawFdState::Closed => {
-                        return Poll::Ready(Err(Error::from_raw_os_error(libc::EBADFD)));
-                    }
-                };
+                let fd = this.get_fd()?;
 
                 let waker = cx.waker().clone();
 
