@@ -19,12 +19,16 @@ pub enum Event {
     Connect(Mutex<ConnectEvent>),
 
     Accept(Mutex<AcceptEvent>),
+
+    Recv(Mutex<RecvEvent>),
+
+    Send(Mutex<SendEvent>),
 }
 
 impl Event {
     pub fn cancel(&self) {
         match self {
-            Event::Nothing | Event::Read(_) | Event::Write(_) => {}
+            Event::Nothing | Event::Read(_) | Event::Write(_) | Event::Recv(_) | Event::Send(_) => {}
             Event::Open(open_event) => {
                 open_event.lock().unwrap().cancel = true;
             }
@@ -41,7 +45,9 @@ impl Event {
 
     pub fn is_cancel(&self) -> bool {
         match self {
-            Event::Nothing | Event::Read(_) | Event::Write(_) => false,
+            Event::Nothing | Event::Read(_) | Event::Write(_) | Event::Recv(_) | Event::Send(_) => {
+                false
+            }
             Event::Open(open_event) => open_event.lock().unwrap().cancel,
             Event::Connect(connect_event) => connect_event.lock().unwrap().cancel,
             Event::Accept(accept_event) => accept_event.lock().unwrap().cancel,
@@ -90,6 +96,22 @@ impl Event {
                 accept_event.result.replace(result);
 
                 accept_event.waker.wake();
+            }
+
+            Event::Recv(recv_event) => {
+                let mut recv_event = recv_event.lock().unwrap();
+
+                recv_event.result.replace(result);
+
+                recv_event.waker.wake();
+            }
+
+            Event::Send(send_event) => {
+                let mut send_event = send_event.lock().unwrap();
+
+                send_event.result.replace(result);
+
+                send_event.waker.wake();
             }
         }
     }
@@ -205,6 +227,38 @@ impl Drop for AcceptEvent {
             if let Some(Ok(fd)) = self.result {
                 let _ = nix::unistd::close(fd as _);
             }
+        }
+    }
+}
+
+pub struct RecvEvent {
+    pub buf: Option<Buffer>,
+    pub waker: AtomicWaker,
+    pub result: Option<io::Result<usize>>,
+}
+
+impl RecvEvent {
+    pub fn new(buf: Buffer) -> Self {
+        Self {
+            buf: Some(buf),
+            waker: Default::default(),
+            result: None,
+        }
+    }
+}
+
+pub struct SendEvent {
+    pub buf: Option<Buffer>,
+    pub waker: AtomicWaker,
+    pub result: Option<io::Result<usize>>,
+}
+
+impl SendEvent {
+    pub fn new(buf: Buffer) -> Self {
+        Self {
+            buf: Some(buf),
+            waker: Default::default(),
+            result: None,
         }
     }
 }

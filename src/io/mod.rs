@@ -1,8 +1,8 @@
 use std::ffi::CString;
+use std::io::{Read, Result, Write};
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
-use std::io::{Read, Result, Write};
 use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
@@ -10,8 +10,8 @@ use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Buf;
@@ -21,7 +21,7 @@ use nix::sys::socket;
 pub use read_half::*;
 pub use write_half::*;
 
-use crate::drive::{AcceptEvent, Drive, Event, ReadEvent, WriteEvent};
+use crate::drive::{AcceptEvent, Drive, Event, ReadEvent, RecvEvent, SendEvent, WriteEvent};
 use crate::from_nix_err;
 use crate::fs::Open;
 use crate::io::buffer::Buffer;
@@ -99,6 +99,10 @@ impl<D> FileDescriptor<D> {
             RawFdState::Closed => Err(Error::from_raw_os_error(libc::EBADFD)),
         }
     }
+
+    pub fn get_driver_mut(&mut self) -> &mut D {
+        &mut self.driver
+    }
 }
 
 impl<D: Clone> FileDescriptor<D> {
@@ -174,7 +178,7 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
                                 return Poll::Ready(Err(Error::new(
                                     ErrorKind::InvalidData,
                                     format!("invalid addr {:?}", addr),
-                                )))
+                                )));
                             }
                         };
 
@@ -384,13 +388,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 buf.write_all(data).expect("fill data to buf failed");
 
-                let fd = match &this.fd {
-                    RawFdState::Opened(fd) => *fd,
-                    RawFdState::Shared(fd, _) => *fd,
-                    RawFdState::Closed => {
-                        return Poll::Ready(Err(Error::from_raw_os_error(libc::EBADFD)));
-                    }
-                };
+                let fd = this.get_fd()?;
 
                 let offset = this.offset.unwrap_or(0);
 
@@ -411,7 +409,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 this.event = event;
 
-                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
+                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
 
                 Poll::Pending
             }
@@ -479,6 +477,206 @@ impl<D: Drive + Unpin> AsyncSeek for FileDescriptor<D> {
             Poll::Ready(Ok(*offset as _))
         } else {
             Poll::Ready(Err(Error::from_raw_os_error(libc::ESPIPE)))
+        }
+    }
+}
+
+impl<D: Drive + Unpin> FileDescriptor<D> {
+    pub fn poll_recv_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8]>> {
+        const BUFFER_SIZE: usize = 12 * 1024;
+
+        let this = self.get_mut();
+
+        match &*this.event {
+            Event::Recv(recv_event) => {
+                let mut recv_event = recv_event.lock().unwrap();
+
+                match recv_event.result.take() {
+                    None => {
+                        recv_event.waker.register(cx.waker());
+
+                        futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
+
+                        Poll::Pending
+                    }
+
+                    Some(result) => match result {
+                        Err(err) => {
+                            drop(recv_event);
+
+                            this.cancel();
+
+                            Poll::Ready(Err(err))
+                        }
+
+                        Ok(result) => {
+                            recv_event.result.replace(Ok(result));
+
+                            if this.buf.is_none() {
+                                this.buf.replace(recv_event.buf.take().unwrap());
+                            }
+
+                            Poll::Ready(Ok(&this.buf.as_ref().unwrap()[..result]))
+                        }
+                    },
+                }
+            }
+            _ => {
+                this.cancel();
+
+                let mut buf = this
+                    .buf
+                    .take()
+                    .map(|mut buf| {
+                        buf.resize(BUFFER_SIZE, 0);
+
+                        buf
+                    })
+                    .unwrap_or_else(|| Buffer::new(BUFFER_SIZE));
+
+                let fd = this.get_fd()?;
+
+                let waker = cx.waker().clone();
+
+                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                    cx,
+                    |sqe, _cx| {
+                        unsafe {
+                            uring_sys::io_uring_prep_recv(
+                                sqe.raw_mut(),
+                                fd,
+                                buf.as_mut_ptr() as *mut libc::c_void,
+                                buf.len(),
+                                0,
+                            );
+                        }
+
+                        let recv_event = RecvEvent::new(buf);
+                        recv_event.waker.register(&waker);
+
+                        Arc::new(Event::Recv(Mutex::new(recv_event)))
+                    }
+                ))?;
+
+                this.event = event;
+
+                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
+
+                Poll::Pending
+            }
+        }
+    }
+
+    pub fn recv_consume(self: Pin<&mut Self>, amt: usize) {
+        let this = self.get_mut();
+
+        if let Event::Recv(recv_event) = &*this.event {
+            let mut recv_event = recv_event.lock().unwrap();
+
+            if let Some(Ok(mut result)) = recv_event.result.take() {
+                assert!(result >= amt);
+
+                result -= amt;
+
+                if let Some(offset) = this.offset.as_mut() {
+                    *offset += amt;
+                }
+
+                if let Some(buf) = this.buf.as_mut() {
+                    buf.advance(amt);
+                }
+
+                if result > 0 {
+                    recv_event.result.replace(Ok(result));
+                } else {
+                    drop(recv_event);
+
+                    this.event = Arc::new(Event::Nothing);
+                }
+            }
+        }
+    }
+
+    pub fn poll_recv(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Result<usize>> {
+        let mut inner_buf = futures_util::ready!(self.as_mut().poll_recv_fill_buf(cx))?;
+
+        let n = (&mut inner_buf).read(buf)?;
+
+        self.as_mut().recv_consume(n);
+
+        Poll::Ready(Ok(n))
+    }
+
+    pub fn poll_send(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<Result<usize>> {
+        let this = self.get_mut();
+
+        match &*this.event {
+            Event::Send(send_event) => {
+                let mut send_event = send_event.lock().unwrap();
+
+                match send_event.result.take() {
+                    None => {
+                        send_event.waker.register(cx.waker());
+
+                        futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
+
+                        Poll::Pending
+                    }
+
+                    Some(result) => {
+                        drop(send_event);
+
+                        this.cancel();
+
+                        Poll::Ready(result)
+                    }
+                }
+            }
+
+            _ => {
+                this.cancel();
+
+                let mut buf = this.buf.take().unwrap_or_else(|| Buffer::new(data.len()));
+
+                buf.write_all(data).expect("fill data to buf failed");
+
+                let fd = this.get_fd()?;
+
+                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            uring_sys::io_uring_prep_send(
+                                sqe.raw_mut(),
+                                fd,
+                                buf.as_ptr() as *const libc::c_void,
+                                buf.len(),
+                                0,
+                            );
+                        }
+
+                        let send_event = SendEvent::new(buf);
+
+                        send_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Send(Mutex::new(send_event)))
+                    }
+                ))?;
+
+                this.event = event;
+
+                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
+
+                Poll::Pending
+            }
         }
     }
 }
