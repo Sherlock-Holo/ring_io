@@ -11,18 +11,18 @@ use nix::sys::socket;
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
 use crate::drive::{self, DemoDriver, Drive};
-use crate::from_nix_err;
 use crate::io::FileDescriptor;
 use crate::net::TcpStream;
+use crate::{from_nix_err, fs};
 
-const BACKLOG: usize = 128;
+const FALLBACK_BACKLOG: usize = 128;
 
 pub struct TcpListener<D> {
     fd: FileDescriptor<D>,
 }
 
 impl<D> TcpListener<D> {
-    pub fn bind_with_driver(addr: SocketAddr, driver: D) -> io::Result<Self> {
+    pub async fn bind_with_driver(addr: SocketAddr, driver: D) -> io::Result<Self> {
         let addr_family = if addr.is_ipv4() {
             AddressFamily::Inet
         } else {
@@ -43,7 +43,15 @@ impl<D> TcpListener<D> {
         )
         .map_err(from_nix_err)?;
 
-        socket::listen(fd, BACKLOG).map_err(from_nix_err)?;
+        let backlog = match fs::read_to_string("/proc/sys/net/core/somaxconn").await {
+            Err(_) => FALLBACK_BACKLOG,
+            Ok(somaxconn) => match somaxconn.parse::<usize>() {
+                Err(_) => FALLBACK_BACKLOG,
+                Ok(somaxconn) => somaxconn,
+            },
+        };
+
+        socket::listen(fd, backlog).map_err(from_nix_err)?;
 
         Ok(Self {
             fd: FileDescriptor::new(fd, driver, None),
@@ -65,8 +73,9 @@ impl<D> TcpListener<D> {
 }
 
 impl TcpListener<DemoDriver> {
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
-        Self::bind_with_driver(addr, drive::get_default_driver())
+    #[inline]
+    pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_driver(addr, drive::get_default_driver()).await
     }
 }
 
@@ -104,16 +113,18 @@ mod tests {
     #[test]
     fn test_tcp_listener_bind() {
         futures_executor::block_on(async {
-            let _listener = TcpListener::bind("0.0.0.0:0".parse().unwrap()).unwrap();
-
-            // let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let _listener = TcpListener::bind("0.0.0.0:0".parse().unwrap())
+                .await
+                .unwrap();
         })
     }
 
     #[test]
     fn test_tcp_listener_accept() {
         futures_executor::block_on(async {
-            let mut listener = TcpListener::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+            let mut listener = TcpListener::bind("0.0.0.0:0".parse().unwrap())
+                .await
+                .unwrap();
 
             let _stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 
@@ -124,7 +135,9 @@ mod tests {
     #[test]
     fn test_tcp_listener_close() {
         futures_executor::block_on(async {
-            let listener = TcpListener::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+            let listener = TcpListener::bind("0.0.0.0:0".parse().unwrap())
+                .await
+                .unwrap();
 
             let addr = listener.local_addr().unwrap();
 
@@ -137,7 +150,9 @@ mod tests {
     #[test]
     fn test_tcp_listener_stream() {
         futures_executor::block_on(async {
-            let mut listener = TcpListener::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+            let mut listener = TcpListener::bind("0.0.0.0:0".parse().unwrap())
+                .await
+                .unwrap();
 
             let _stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
 
