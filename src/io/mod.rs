@@ -1,8 +1,8 @@
 use std::ffi::CString;
-use std::io::{Read, Result, Write};
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
+use std::io::{Read, Result, Write};
 use std::net::SocketAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
@@ -10,13 +10,14 @@ use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Buf;
 use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 use nix::sys::socket;
+use parking_lot::Mutex;
 
 pub use read_half::*;
 pub use write_half::*;
@@ -166,7 +167,7 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
 
         match &*this.event {
             Event::Accept(accept_event) => {
-                let mut accept_event = accept_event.lock().unwrap();
+                let mut accept_event = accept_event.lock();
 
                 match accept_event.result.take() {
                     Some(result) => {
@@ -181,6 +182,10 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
                                 )));
                             }
                         };
+
+                        drop(accept_event);
+
+                        this.cancel();
 
                         Poll::Ready(Ok((TcpStream::new(fd as _, this.driver.clone()), addr)))
                     }
@@ -198,13 +203,11 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
 
                 let fd = this.get_fd()?;
 
-                let waker = cx.waker().clone();
-
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                /*let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, _cx| {
                         unsafe {
-                            sqe.prep_accept(fd, None, iou::SockFlag::SOCK_NONBLOCK);
+                            sqe.prep_accept(fd, None, iou::SockFlag::empty());
                         }
 
                         let accept_event = AcceptEvent::new();
@@ -219,7 +222,53 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
 
                 futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
 
-                Poll::Pending
+                Poll::Pending*/
+                match Pin::new(&mut this.driver).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            sqe.prep_accept(fd, None, iou::SockFlag::empty());
+                        }
+
+                        let accept_event = AcceptEvent::new();
+
+                        accept_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Accept(Mutex::new(accept_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(&mut this.driver).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(
+                                        Pin::new(&mut this.driver).poll_submit(cx, true)
+                                    )?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }
@@ -227,13 +276,13 @@ impl<D: Drive + Unpin + Clone> FileDescriptor<D> {
 
 impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8]>> {
-        const BUFFER_SIZE: usize = 12 * 1024;
+        const BUFFER_SIZE: usize = 256 * 1024;
 
         let this = self.get_mut();
 
         match &*this.event {
             Event::Read(read_event) => {
-                let mut read_event = read_event.lock().unwrap();
+                let mut read_event = read_event.lock();
 
                 match read_event.result.take() {
                     None => {
@@ -282,9 +331,7 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
 
                 let fd = this.get_fd()?;
 
-                let waker = cx.waker().clone();
-
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                /*let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, _cx| {
                         unsafe {
@@ -296,13 +343,52 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
 
                         Arc::new(Event::Read(Mutex::new(read_event)))
                     }
-                ))?;
+                ))?;*/
+                match Pin::new(&mut this.driver).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            sqe.prep_read(fd, buf.as_mut(), offset);
+                        }
 
-                this.event = event;
+                        let read_event = ReadEvent::new(buf);
+                        read_event.waker.register(cx.waker());
 
-                futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
+                        Arc::new(Event::Read(Mutex::new(read_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
 
-                Poll::Pending
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(&mut this.driver).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(
+                                        Pin::new(&mut this.driver).poll_submit(cx, true)
+                                    )?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }
@@ -311,10 +397,10 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
         let this = self.get_mut();
 
         if let Event::Read(read_event) = &*this.event {
-            let mut read_event = read_event.lock().unwrap();
+            let mut read_event = read_event.lock();
 
             if let Some(Ok(mut result)) = read_event.result.take() {
-                assert!(result >= amt);
+                debug_assert!(result >= amt);
 
                 result -= amt;
 
@@ -331,7 +417,7 @@ impl<D: Drive + Unpin> AsyncBufRead for FileDescriptor<D> {
                 } else {
                     drop(read_event);
 
-                    this.event = Arc::new(Event::Nothing);
+                    this.cancel();
                 }
             }
         }
@@ -360,7 +446,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
         match &*this.event {
             Event::Write(write_event) => {
-                let mut write_event = write_event.lock().unwrap();
+                let mut write_event = write_event.lock();
 
                 match write_event.result.take() {
                     None => {
@@ -392,7 +478,7 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 let offset = this.offset.unwrap_or(0);
 
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                /*let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, cx| {
                         unsafe {
@@ -411,7 +497,54 @@ impl<D: Drive + Unpin> AsyncWrite for FileDescriptor<D> {
 
                 futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
 
-                Poll::Pending
+                Poll::Pending*/
+
+                match Pin::new(&mut this.driver).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            sqe.prep_write(fd, buf.as_ref(), offset);
+                        }
+
+                        let write_event = WriteEvent::new(buf);
+
+                        write_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Write(Mutex::new(write_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(&mut this.driver).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(
+                                        Pin::new(&mut this.driver).poll_submit(cx, true)
+                                    )?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }
@@ -489,7 +622,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
         match &*this.event {
             Event::Recv(recv_event) => {
-                let mut recv_event = recv_event.lock().unwrap();
+                let mut recv_event = recv_event.lock();
 
                 match recv_event.result.take() {
                     None => {
@@ -536,9 +669,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
                 let fd = this.get_fd()?;
 
-                let waker = cx.waker().clone();
-
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                /*let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, _cx| {
                         unsafe {
@@ -562,7 +693,58 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
                 futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, true))?;
 
-                Poll::Pending
+                Poll::Pending*/
+                match Pin::new(&mut this.driver).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            uring_sys::io_uring_prep_recv(
+                                sqe.raw_mut(),
+                                fd,
+                                buf.as_mut_ptr() as *mut libc::c_void,
+                                buf.len(),
+                                0,
+                            );
+                        }
+
+                        let recv_event = RecvEvent::new(buf);
+                        recv_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Recv(Mutex::new(recv_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(&mut this.driver).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(
+                                        Pin::new(&mut this.driver).poll_submit(cx, true)
+                                    )?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }
@@ -571,7 +753,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
         let this = self.get_mut();
 
         if let Event::Recv(recv_event) = &*this.event {
-            let mut recv_event = recv_event.lock().unwrap();
+            let mut recv_event = recv_event.lock();
 
             if let Some(Ok(mut result)) = recv_event.result.take() {
                 assert!(result >= amt);
@@ -591,7 +773,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
                 } else {
                     drop(recv_event);
 
-                    this.event = Arc::new(Event::Nothing);
+                    this.cancel();
                 }
             }
         }
@@ -620,7 +802,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
         match &*this.event {
             Event::Send(send_event) => {
-                let mut send_event = send_event.lock().unwrap();
+                let mut send_event = send_event.lock();
 
                 match send_event.result.take() {
                     None => {
@@ -650,7 +832,7 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
                 let fd = this.get_fd()?;
 
-                let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
+                /*let event = futures_util::ready!(Pin::new(&mut this.driver).poll_prepare(
                     cx,
                     |sqe, cx| {
                         unsafe {
@@ -675,7 +857,59 @@ impl<D: Drive + Unpin> FileDescriptor<D> {
 
                 futures_util::ready!(Pin::new(&mut this.driver).poll_submit(cx, false))?;
 
-                Poll::Pending
+                Poll::Pending*/
+                match Pin::new(&mut this.driver).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            uring_sys::io_uring_prep_send(
+                                sqe.raw_mut(),
+                                fd,
+                                buf.as_ptr() as *const libc::c_void,
+                                buf.len(),
+                                0,
+                            );
+                        }
+
+                        let send_event = SendEvent::new(buf);
+
+                        send_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Send(Mutex::new(send_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(&mut this.driver).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(
+                                        Pin::new(&mut this.driver).poll_submit(cx, true)
+                                    )?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }

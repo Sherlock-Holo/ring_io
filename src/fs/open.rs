@@ -6,12 +6,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use libc::{c_int, mode_t};
+use parking_lot::Mutex;
 
-use crate::drive::{self, DemoDriver, Drive, Event, OpenEvent};
+use crate::drive::{self, DefaultDriver, Drive, Event, OpenEvent};
 use crate::fs::File;
 use crate::io::FileDescriptor;
 
@@ -49,7 +50,7 @@ impl<D: Drive + Unpin> Future for Open<D> {
 
         match &*this.event {
             Event::Open(open_event) => {
-                let mut open_event = open_event.lock().unwrap();
+                let mut open_event = open_event.lock();
 
                 if open_event.result.is_none() {
                     open_event.waker.register(cx.waker());
@@ -77,7 +78,7 @@ impl<D: Drive + Unpin> Future for Open<D> {
                 let flags = this.flags;
                 let mode = this.mode;
 
-                let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
+                /*let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
                     .poll_prepare(cx, |sqe, cx| {
                         unsafe {
                             uring_sys::io_uring_prep_openat(
@@ -102,7 +103,58 @@ impl<D: Drive + Unpin> Future for Open<D> {
                     Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, false)
                 )?;
 
-                Poll::Pending
+                Poll::Pending*/
+                match Pin::new(this.driver.as_mut().unwrap()).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        unsafe {
+                            uring_sys::io_uring_prep_openat(
+                                sqe.raw_mut(),
+                                libc::AT_FDCWD,
+                                path,
+                                flags,
+                                mode,
+                            );
+                        }
+
+                        let open_event = OpenEvent::new();
+
+                        open_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Open(Mutex::new(open_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
+                                        .poll_submit(cx, true))?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
 
             _ => unreachable!(),
@@ -148,7 +200,7 @@ impl OpenOptions {
         }
     }
 
-    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File<DemoDriver>> {
+    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File<DefaultDriver>> {
         let flags = libc::O_CLOEXEC
             | self.get_access_mode()?
             | self.get_creation_mode()?

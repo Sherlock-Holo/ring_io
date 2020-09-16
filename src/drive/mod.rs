@@ -1,14 +1,16 @@
-use std::io;
+use std::io::Result;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-pub use demo::get_default_driver;
-pub use demo::DemoDriver;
+pub use default_driver::get_default_driver;
+pub use default_driver::DefaultDriver;
 pub use event::*;
 
-mod demo;
+mod default_driver;
 mod event;
+
+pub type PollPrepareSubmit = (Poll<Result<Arc<Event>>>, Option<Poll<Result<usize>>>);
 
 /// Implemented by drivers for io-uring.
 ///
@@ -33,7 +35,7 @@ pub trait Drive {
         self: Pin<&mut Self>,
         cx: &mut Context<'cx>,
         prepare: impl FnOnce(&mut iou::SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
-    ) -> Poll<io::Result<Arc<Event>>>;
+    ) -> Poll<Result<Arc<Event>>>;
 
     /// Submit all of the events on the submission queue.
     ///
@@ -49,9 +51,28 @@ pub trait Drive {
     /// It is also valid not to submit an event but not to register a waker to try again, in which
     /// case the appropriate response would be to return `Ok(0)`. This indicates to the caller that
     /// the submission step is complete, whether or not actual IO was performed.
-    fn poll_submit(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        eager: bool,
-    ) -> Poll<io::Result<usize>>;
+    fn poll_submit(self: Pin<&mut Self>, cx: &mut Context<'_>, eager: bool) -> Poll<Result<usize>>;
+
+    fn poll_prepare_with_submit<'cx>(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'cx>,
+        prepare: impl FnOnce(&mut iou::SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
+        eager: Option<bool>,
+    ) -> PollPrepareSubmit {
+        let event = match self.as_mut().poll_prepare(cx, prepare) {
+            Poll::Pending => return (Poll::Pending, None),
+            Poll::Ready(result) => match result {
+                Err(err) => return (Poll::Ready(Err(err)), None),
+                Ok(event) => event,
+            },
+        };
+
+        match eager {
+            None => (Poll::Ready(Ok(event)), None),
+            Some(eager) => match self.as_mut().poll_submit(cx, eager) {
+                Poll::Pending => (Poll::Ready(Ok(event)), Some(Poll::Pending)),
+                Poll::Ready(result) => (Poll::Ready(Ok(event)), Some(Poll::Ready(result))),
+            },
+        }
+    }
 }

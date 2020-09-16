@@ -7,14 +7,16 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::RawFd;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use nix::sys::socket;
+use nix::sys::socket::sockopt::ReuseAddr;
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
+use parking_lot::Mutex;
 
-use crate::drive::{self, ConnectEvent, DemoDriver, Drive, Event};
+use crate::drive::{self, ConnectEvent, DefaultDriver, Drive, Event};
 use crate::from_nix_err;
 use crate::io::{FileDescriptor, ReadHalf, WriteHalf};
 
@@ -82,9 +84,9 @@ impl<D: Clone> TcpStream<D> {
     }
 }
 
-impl TcpStream<DemoDriver> {
+impl TcpStream<DefaultDriver> {
     #[inline]
-    pub fn connect(addr: SocketAddr) -> Connect<DemoDriver> {
+    pub fn connect(addr: SocketAddr) -> Connect<DefaultDriver> {
         Connect::new_with_driver(addr, drive::get_default_driver())
     }
 }
@@ -145,13 +147,13 @@ impl<D> IntoRawFd for TcpStream<D> {
     }
 }
 
-impl FromRawFd for TcpStream<DemoDriver> {
+impl FromRawFd for TcpStream<DefaultDriver> {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         TcpStream::new(fd, drive::get_default_driver())
     }
 }
 
-impl From<std::net::TcpStream> for TcpStream<DemoDriver> {
+impl From<std::net::TcpStream> for TcpStream<DefaultDriver> {
     fn from(std_tcp_stream: std::net::TcpStream) -> Self {
         unsafe { Self::from_raw_fd(std_tcp_stream.into_raw_fd()) }
     }
@@ -192,7 +194,7 @@ impl<D: Drive + Unpin> Future for Connect<D> {
                 let fd = match socket::socket(
                     address_family,
                     SockType::Stream,
-                    SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+                    SockFlag::SOCK_CLOEXEC,
                     SockProtocol::Tcp,
                 ) {
                     Err(err) => {
@@ -205,9 +207,11 @@ impl<D: Drive + Unpin> Future for Connect<D> {
                     Ok(fd) => fd,
                 };
 
+                socket::setsockopt(fd, ReuseAddr, &true).map_err(from_nix_err)?;
+
                 let addr = this.addr;
 
-                let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
+                /*let event = futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
                     .poll_prepare(cx, |sqe, cx| {
                         let connect_event = ConnectEvent::new(fd, &addr);
 
@@ -226,11 +230,56 @@ impl<D: Drive + Unpin> Future for Connect<D> {
                     Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, false)
                 )?;
 
-                Poll::Pending
+                Poll::Pending*/
+                match Pin::new(this.driver.as_mut().unwrap()).poll_prepare_with_submit(
+                    cx,
+                    |sqe, cx| {
+                        let connect_event = ConnectEvent::new(fd, &addr);
+
+                        unsafe {
+                            sqe.prep_connect(fd, &connect_event.addr);
+                        }
+
+                        connect_event.waker.register(cx.waker());
+
+                        Arc::new(Event::Connect(Mutex::new(connect_event)))
+                    },
+                    Some(false),
+                ) {
+                    (Poll::Pending, _) => Poll::Pending,
+                    (Poll::Ready(result), poll_result) => {
+                        this.event = result?;
+
+                        match poll_result {
+                            None => {
+                                futures_util::ready!(
+                                    Pin::new(this.driver.as_mut().unwrap()).poll_submit(cx, true)
+                                )?;
+
+                                Poll::Pending
+                            }
+
+                            Some(poll_result) => match poll_result {
+                                Poll::Pending => {
+                                    futures_util::ready!(Pin::new(this.driver.as_mut().unwrap())
+                                        .poll_submit(cx, true))?;
+
+                                    Poll::Pending
+                                }
+
+                                Poll::Ready(result) => {
+                                    result?;
+
+                                    Poll::Pending
+                                }
+                            },
+                        }
+                    }
+                }
             }
 
             Event::Connect(connect_event) => {
-                let mut connect_event = connect_event.lock().unwrap();
+                let mut connect_event = connect_event.lock();
 
                 match connect_event.result.take() {
                     None => {

@@ -1,9 +1,9 @@
 use std::io;
 use std::net::SocketAddr;
 use std::os::unix::io::RawFd;
-use std::sync::Mutex;
 
 use futures_util::task::AtomicWaker;
+use parking_lot::Mutex;
 
 use crate::io::buffer::Buffer;
 
@@ -28,17 +28,18 @@ pub enum Event {
 impl Event {
     pub fn cancel(&self) {
         match self {
-            Event::Nothing | Event::Read(_) | Event::Write(_) | Event::Recv(_) | Event::Send(_) => {}
+            Event::Nothing | Event::Read(_) | Event::Write(_) | Event::Recv(_) | Event::Send(_) => {
+            }
             Event::Open(open_event) => {
-                open_event.lock().unwrap().cancel = true;
+                open_event.lock().cancel = true;
             }
 
             Event::Connect(connect_event) => {
-                connect_event.lock().unwrap().cancel = true;
+                connect_event.lock().cancel = true;
             }
 
             Event::Accept(accept_event) => {
-                accept_event.lock().unwrap().cancel = true;
+                accept_event.lock().cancel = true;
             }
         }
     }
@@ -48,9 +49,9 @@ impl Event {
             Event::Nothing | Event::Read(_) | Event::Write(_) | Event::Recv(_) | Event::Send(_) => {
                 false
             }
-            Event::Open(open_event) => open_event.lock().unwrap().cancel,
-            Event::Connect(connect_event) => connect_event.lock().unwrap().cancel,
-            Event::Accept(accept_event) => accept_event.lock().unwrap().cancel,
+            Event::Open(open_event) => open_event.lock().cancel,
+            Event::Connect(connect_event) => connect_event.lock().cancel,
+            Event::Accept(accept_event) => accept_event.lock().cancel,
         }
     }
 
@@ -59,7 +60,7 @@ impl Event {
             Event::Nothing => {}
 
             Event::Read(read_event) => {
-                let mut read_event = read_event.lock().unwrap();
+                let mut read_event = read_event.lock();
 
                 read_event.result.replace(result);
 
@@ -67,7 +68,7 @@ impl Event {
             }
 
             Event::Write(write_event) => {
-                let mut write_event = write_event.lock().unwrap();
+                let mut write_event = write_event.lock();
 
                 write_event.result.replace(result);
 
@@ -75,7 +76,7 @@ impl Event {
             }
 
             Event::Open(open_event) => {
-                let mut open_event = open_event.lock().unwrap();
+                let mut open_event = open_event.lock();
 
                 open_event.result.replace(result);
 
@@ -83,7 +84,7 @@ impl Event {
             }
 
             Event::Connect(connect_event) => {
-                let mut connect_event = connect_event.lock().unwrap();
+                let mut connect_event = connect_event.lock();
 
                 connect_event.result.replace(result.map(|_| ()));
 
@@ -91,7 +92,7 @@ impl Event {
             }
 
             Event::Accept(accept_event) => {
-                let mut accept_event = accept_event.lock().unwrap();
+                let mut accept_event = accept_event.lock();
 
                 accept_event.result.replace(result);
 
@@ -99,7 +100,7 @@ impl Event {
             }
 
             Event::Recv(recv_event) => {
-                let mut recv_event = recv_event.lock().unwrap();
+                let mut recv_event = recv_event.lock();
 
                 recv_event.result.replace(result);
 
@@ -107,7 +108,7 @@ impl Event {
             }
 
             Event::Send(send_event) => {
-                let mut send_event = send_event.lock().unwrap();
+                let mut send_event = send_event.lock();
 
                 send_event.result.replace(result);
 

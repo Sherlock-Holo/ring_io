@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::drive;
-use crate::drive::{DemoDriver, Drive};
+use crate::drive::{DefaultDriver, Drive};
 use crate::fs::Open;
 use crate::io::FileDescriptor;
 
@@ -24,8 +24,8 @@ impl<D> File<D> {
     }
 }
 
-impl File<DemoDriver> {
-    pub fn open(path: impl AsRef<Path>) -> Open<DemoDriver> {
+impl File<DefaultDriver> {
+    pub fn open(path: impl AsRef<Path>) -> Open<DefaultDriver> {
         FileDescriptor::open_with_driver(path, drive::get_default_driver())
     }
 }
@@ -99,13 +99,13 @@ impl<D> IntoRawFd for File<D> {
     }
 }
 
-impl FromRawFd for File<DemoDriver> {
+impl FromRawFd for File<DefaultDriver> {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         File::new(FileDescriptor::new(fd, drive::get_default_driver(), 0))
     }
 }
 
-impl From<std::fs::File> for File<DemoDriver> {
+impl From<std::fs::File> for File<DefaultDriver> {
     fn from(std_file: std::fs::File) -> Self {
         unsafe { Self::from_raw_fd(std_file.into_raw_fd()) }
     }

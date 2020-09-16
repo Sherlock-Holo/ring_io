@@ -8,9 +8,10 @@ use std::task::{Context, Poll};
 use futures_util::future;
 use futures_util::stream::Stream;
 use nix::sys::socket;
+use nix::sys::socket::sockopt::ReuseAddr;
 use nix::sys::socket::{AddressFamily, SockFlag, SockProtocol, SockType};
 
-use crate::drive::{self, DemoDriver, Drive};
+use crate::drive::{self, DefaultDriver, Drive};
 use crate::io::FileDescriptor;
 use crate::net::TcpStream;
 use crate::{from_nix_err, fs};
@@ -32,10 +33,12 @@ impl<D> TcpListener<D> {
         let fd = socket::socket(
             addr_family,
             SockType::Stream,
-            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+            SockFlag::SOCK_CLOEXEC,
             SockProtocol::Tcp,
         )
         .map_err(from_nix_err)?;
+
+        socket::setsockopt(fd, ReuseAddr, &true).map_err(from_nix_err)?;
 
         socket::bind(
             fd,
@@ -72,7 +75,7 @@ impl<D> TcpListener<D> {
     }
 }
 
-impl TcpListener<DemoDriver> {
+impl TcpListener<DefaultDriver> {
     #[inline]
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
         Self::bind_with_driver(addr, drive::get_default_driver()).await

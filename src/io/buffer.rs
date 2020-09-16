@@ -14,7 +14,8 @@ impl Buffer {
     pub fn new(size: usize) -> Self {
         let mut buf = BytesMut::with_capacity(size);
 
-        buf.resize(size, 0);
+        // buf.resize(size, 0);
+        unsafe { buf.set_len(size) }
 
         Self { offset: 0, buf }
     }
@@ -28,7 +29,8 @@ impl Buffer {
 
         self.buf.clear();
 
-        self.buf.resize(self.buf.capacity(), 0);
+        // self.buf.resize(self.buf.capacity(), 0);
+        unsafe { self.buf.set_len(self.buf.capacity()) }
     }
 
     pub fn resize(&mut self, mut new_len: usize, value: u8) {
@@ -86,7 +88,12 @@ impl Write for Buffer {
     fn write(&mut self, data: &[u8]) -> Result<usize> {
         self.offset = 0;
 
-        self.buf.resize(data.len(), 0);
+        // self.buf.resize(data.len(), 0);
+        if self.buf.len() > data.len() {
+            unsafe { self.buf.set_len(data.len()) }
+        } else {
+            self.buf.resize(data.len(), 0);
+        }
 
         self.buf.copy_from_slice(data);
 

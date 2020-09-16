@@ -1,6 +1,6 @@
 use std::io::Result;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::{ptr, thread};
@@ -8,17 +8,19 @@ use std::{ptr, thread};
 use futures_util::task::AtomicWaker;
 use iou::{CompletionQueueEvent, Registrar, SubmissionQueue, SubmissionQueueEvent};
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use slab::Slab;
 
 use crate::drive::event::Event;
+use crate::drive::PollPrepareSubmit;
 
 use super::Drive;
 
-pub fn get_default_driver() -> DemoDriver {
+pub fn get_default_driver() -> DefaultDriver {
     const SQ_ENTRIES: u32 = 1024;
 
-    static DRIVER: Lazy<DemoDriver> =
-        Lazy::new(|| DemoDriver::new(SQ_ENTRIES, 64, Duration::from_micros(100)).unwrap());
+    static DRIVER: Lazy<DefaultDriver> =
+        Lazy::new(|| DefaultDriver::new(SQ_ENTRIES, 64, Duration::from_micros(100)).unwrap());
 
     let driver = &*DRIVER;
 
@@ -26,12 +28,12 @@ pub fn get_default_driver() -> DemoDriver {
 }
 
 #[derive(Clone)]
-pub struct DemoDriver {
+pub struct DefaultDriver {
     inner: Arc<InnerDriver>,
     max_submit: usize,
 }
 
-impl DemoDriver {
+impl DefaultDriver {
     pub fn new(
         entries: u32,
         max_submit: usize,
@@ -47,7 +49,7 @@ impl DemoDriver {
             thread::spawn(move || loop {
                 thread::sleep(submit_interval);
 
-                let mut sq = inner.sq.lock().unwrap();
+                let mut sq = inner.sq.lock();
 
                 let (sq, prepare_count) = &mut *sq;
 
@@ -63,17 +65,17 @@ impl DemoDriver {
             });
         }
 
-        Ok(DemoDriver { inner, max_submit })
+        Ok(DefaultDriver { inner, max_submit })
     }
 }
 
-impl Drive for DemoDriver {
+impl Drive for DefaultDriver {
     fn poll_prepare<'cx>(
         self: Pin<&mut Self>,
         cx: &mut Context<'cx>,
         prepare: impl FnOnce(&mut SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
     ) -> Poll<Result<Arc<Event>>> {
-        let mut sq = self.inner.sq.lock().unwrap();
+        let mut sq = self.inner.sq.lock();
         let (sq, prepare_count) = &mut *sq;
 
         match sq.next_sqe() {
@@ -86,7 +88,7 @@ impl Drive for DemoDriver {
             Some(mut sqe) => {
                 let event = prepare(&mut sqe, cx);
 
-                let user_data = self.inner.slab.lock().unwrap().insert(event.clone());
+                let user_data = self.inner.slab.lock().insert(event.clone());
 
                 sqe.set_user_data(user_data as _);
 
@@ -104,7 +106,7 @@ impl Drive for DemoDriver {
         _cx: &mut Context<'_>,
         eager: bool,
     ) -> Poll<Result<usize>> {
-        let mut sq = self.inner.sq.lock().unwrap();
+        let mut sq = self.inner.sq.lock();
         let (sq, prepare_count) = &mut *sq;
 
         if eager {
@@ -125,6 +127,61 @@ impl Drive for DemoDriver {
             }
         } else {
             Poll::Ready(Ok(0))
+        }
+    }
+
+    fn poll_prepare_with_submit<'cx>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'cx>,
+        prepare: impl FnOnce(&mut iou::SubmissionQueueEvent<'_>, &mut Context<'cx>) -> Arc<Event>,
+        eager: Option<bool>,
+    ) -> PollPrepareSubmit {
+        let mut sq = self.inner.sq.lock();
+        let (sq, prepare_count) = &mut *sq;
+
+        match sq.next_sqe() {
+            None => {
+                self.inner.waker.register(cx.waker());
+
+                (Poll::Pending, None)
+            }
+
+            Some(mut sqe) => {
+                let event = prepare(&mut sqe, cx);
+
+                let user_data = self.inner.slab.lock().insert(event.clone());
+
+                sqe.set_user_data(user_data as _);
+
+                if let Some(prepare_count) = prepare_count {
+                    *prepare_count += 1;
+                }
+
+                match eager {
+                    None => (Poll::Ready(Ok(event)), None),
+                    Some(eager) => {
+                        if eager {
+                            if let Some(prepare_count) = prepare_count {
+                                *prepare_count = 0;
+                            }
+
+                            return (Poll::Ready(Ok(event)), Some(Poll::Ready(sq.submit())));
+                        }
+
+                        if let Some(prepare_count) = prepare_count {
+                            if *prepare_count >= self.max_submit {
+                                *prepare_count = 0;
+
+                                (Poll::Ready(Ok(event)), Some(Poll::Ready(sq.submit())))
+                            } else {
+                                (Poll::Ready(Ok(event)), Some(Poll::Ready(Ok(0))))
+                            }
+                        } else {
+                            (Poll::Ready(Ok(event)), Some(Poll::Ready(Ok(0))))
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -192,7 +249,7 @@ fn complete(
     slab: Arc<Mutex<Slab<Arc<Event>>>>,
 ) {
     while let Ok(cqe) = cq.wait_for_cqe() {
-        let mut slab = slab.lock().unwrap();
+        let mut slab = slab.lock();
 
         waker.wake();
 
