@@ -8,7 +8,6 @@ use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::AsyncCancel;
 use io_uring::squeue::Entry as SqEntry;
 use io_uring::IoUring;
-use slab::Slab;
 
 use crate::buffer::GroupBuffer;
 
@@ -41,10 +40,6 @@ impl Driver {
         }
 
         let ring = builder.build(4096)?;
-
-        let mut slab = Slab::new();
-        // drop 0, 0 means we don't need to wake up a task
-        slab.insert(());
 
         Ok(Self {
             ring,
@@ -84,7 +79,7 @@ impl Driver {
         }
     }
 
-    /// this will keep trying pushing sqe until success or error happened
+    /*/// this will keep trying pushing sqe until success or error happened
     pub fn push_sqe_without_waker(&mut self, sqe: SqEntry) -> Result<u64> {
         let user_data = self.next_user_data;
         self.next_user_data += 1;
@@ -101,7 +96,7 @@ impl Driver {
                 }
             }
         }
-    }
+    }*/
 
     pub fn cancel_sqe(&mut self, user_data: u64) -> Result<()> {
         let cancel_sqe = AsyncCancel::new(user_data).build();
@@ -131,6 +126,7 @@ thread_local! {
     pub static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
 }
 
+#[must_use]
 pub enum CancelCallback {
     CancelWithoutCallback { user_data: u64 },
     CancelAndRegisterBuffer { user_data: u64, group_id: u16 },
