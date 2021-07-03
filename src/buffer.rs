@@ -1,40 +1,369 @@
 use std::collections::HashMap;
-use std::io::Result;
 use std::ops::{Deref, DerefMut};
+use std::{mem, ptr};
 
-use io_uring::opcode::ProvideBuffers;
 use slab::Slab;
 
-use crate::driver::DRIVER;
+const EVERY_GROUP_BUFFER_BUFFER_COUNT: usize = 10;
 
-#[derive(Debug)]
-pub struct Buffer {
-    group_id: u16,
-    buffer_id: u16,
-    buffer: Vec<u8>,
-    available_len: usize,
+type GroupIdGenerator = Slab<()>;
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum GroupBufferRegisterState {
+    NotRegister,
+    Registering,
+    Registered,
 }
 
-impl Buffer {
-    pub fn new(group_id: u16, buffer_id: u16) -> Self {
+pub struct BufferManager {
+    group_id_gen: GroupIdGenerator,
+    /// key: buffer len
+    group_buffers: HashMap<usize, GroupBuffers>,
+}
+
+impl BufferManager {
+    pub fn new() -> Self {
         Self {
-            group_id,
-            buffer_id,
-            buffer: vec![0; group_id as _],
-            available_len: 0,
+            group_id_gen: Default::default(),
+            group_buffers: Default::default(),
         }
     }
 
-    pub fn set_available_len(&mut self, available_len: usize) {
-        self.available_len = available_len;
+    pub fn select_group_buffer(&mut self, want_buffer_size: usize) -> &mut GroupBuffer {
+        let group_id_gen = &mut self.group_id_gen;
+
+        self.group_buffers
+            .entry(want_buffer_size)
+            .or_insert_with(|| {
+                let mut group_buffers = GroupBuffers::new(want_buffer_size);
+
+                let new_group_id = group_id_gen.insert(()) as u16;
+
+                let group_buffer = GroupBuffer::new(new_group_id, want_buffer_size);
+
+                group_buffers.insert_new_group_buffer(new_group_id, group_buffer);
+
+                group_buffers
+            })
+            .select_group_buffer(group_id_gen)
     }
 
-    pub fn consume(&mut self, amt: usize) {
-        self.available_len -= amt;
+    /// take a buffer by (buffer_size, group_id, buffer_id, buffer_data_size), if any argument not valid, will panic
+    pub fn take_buffer(
+        &mut self,
+        buffer_size: usize,
+        group_id: u16,
+        buffer_id: u16,
+        buffer_data_size: usize,
+    ) -> Buffer {
+        let group_buffers = self
+            .group_buffers
+            .get_mut(&buffer_size)
+            .unwrap_or_else(|| panic!("buffer size {} not exist", buffer_size));
+
+        assert_eq!(group_buffers.buffer_size, buffer_size);
+
+        let group_buffer = group_buffers
+            .group_buffers
+            .get_mut(&group_id)
+            .unwrap_or_else(|| panic!("group id {} not found", group_id));
+        assert_eq!(
+            group_buffer.register_state,
+            GroupBufferRegisterState::Registered
+        );
+
+        assert!(group_buffer.every_buf_size >= buffer_data_size);
+
+        // Safety: all argument is checked by assert
+        unsafe { group_buffer.take_buffer(buffer_id, buffer_data_size) }
+    }
+
+    pub fn give_back_buffer(&mut self, buffer: Buffer) {
+        let buf_len = buffer.buffer_size();
+
+        let group_buffers = self
+            .group_buffers
+            .get_mut(&buf_len)
+            .unwrap_or_else(|| panic!("buffer len {} group buffers not exist", buf_len));
+
+        group_buffers.give_back_buffer(buffer);
+    }
+
+    pub fn decrease_on_fly_for_not_use_group_buffer(&mut self, buffer_size: usize, group_id: u16) {
+        let group_buffers = self
+            .group_buffers
+            .get_mut(&buffer_size)
+            .unwrap_or_else(|| panic!("buffer size {} not exist", buffer_size));
+
+        let group_buffer = group_buffers
+            .group_buffers
+            .get_mut(&group_id)
+            .unwrap_or_else(|| panic!("group id {} not exist", group_id));
+
+        group_buffer.decrease_on_fly();
+    }
+
+    pub fn group_buffer_mut(&mut self, group_id: u16) -> Option<&mut GroupBuffer> {
+        self.group_buffers
+            .values_mut()
+            .find_map(|group_buffers| group_buffers.group_buffer_mut(group_id))
+    }
+}
+
+pub struct GroupBuffers {
+    buffer_size: usize,
+    group_buffers: HashMap<u16, GroupBuffer>,
+}
+
+impl GroupBuffers {
+    fn new(buffer_size: usize) -> Self {
+        Self {
+            buffer_size,
+            group_buffers: Default::default(),
+        }
+    }
+
+    fn insert_new_group_buffer(&mut self, group_id: u16, group_buffer: GroupBuffer) {
+        // the group_id should not be used
+        debug_assert!(!self.group_buffers.contains_key(&group_id));
+
+        self.group_buffers.insert(group_id, group_buffer);
+    }
+
+    /// select a registered and contains available buffer group buffer at first
+    ///
+    /// if not exist, return a registering group buffer to hint driver it only need to wait
+    ///
+    /// if no available or registering group buffer, create a new group buffer
+    fn select_group_buffer(&mut self, group_id_gen: &mut GroupIdGenerator) -> &mut GroupBuffer {
+        if let Some(group_buffer) = self
+            .group_buffers
+            .values_mut()
+            .filter(|group_buffer| {
+                group_buffer.register_state == GroupBufferRegisterState::Registered
+            })
+            .find(|group_buffer| group_buffer.available > group_buffer.on_fly)
+        {
+            // consider a problem: https://github.com/rust-lang/rust/issues/86842
+            // use some unsafe to beat the rustc
+
+            // return group_buffer;
+
+            let group_buffer: *mut GroupBuffer = group_buffer;
+
+            return unsafe { &mut (*group_buffer) };
+        }
+
+        if let Some(group_buffer) = self.group_buffers.values_mut().find(|group_buffer| {
+            group_buffer.register_state == GroupBufferRegisterState::Registering
+        }) {
+            // consider a problem: https://github.com/rust-lang/rust/issues/86842
+            // use some unsafe to beat the rustc
+
+            // return group_buffer;
+
+            let group_buffer: *mut GroupBuffer = group_buffer;
+
+            return unsafe { &mut (*group_buffer) };
+        }
+
+        let new_group_id = group_id_gen.insert(()) as u16;
+
+        let group_buffer = GroupBuffer::new(new_group_id, self.buffer_size);
+
+        self.insert_new_group_buffer(new_group_id, group_buffer);
+
+        self.group_buffers.get_mut(&new_group_id).unwrap()
+    }
+
+    fn give_back_buffer(&mut self, buffer: Buffer) {
+        let group_id = buffer.group_id();
+
+        let group_buffer = self
+            .group_buffers
+            .get_mut(&group_id)
+            .unwrap_or_else(|| panic!("group id {} group buffer not exist", group_id));
+
+        group_buffer.give_back_buffer();
+    }
+
+    fn group_buffer_mut(&mut self, group_id: u16) -> Option<&mut GroupBuffer> {
+        self.group_buffers.get_mut(&group_id)
+    }
+}
+
+pub struct GroupBuffer {
+    group_id: u16,
+    low_level_buffer: Vec<u8>,
+    every_buf_size: usize,
+    on_fly: u16,
+    available: u16,
+    register_state: GroupBufferRegisterState,
+}
+
+impl GroupBuffer {
+    fn new(group_id: u16, buf_len: usize) -> Self {
+        let low_level_buffer = vec![0; buf_len * EVERY_GROUP_BUFFER_BUFFER_COUNT];
+
+        Self {
+            group_id,
+            low_level_buffer,
+            every_buf_size: buf_len,
+            on_fly: 0,
+            available: 0,
+            register_state: GroupBufferRegisterState::NotRegister,
+        }
+    }
+
+    pub unsafe fn take_buffer(&mut self, buffer_id: u16, available_size: usize) -> Buffer {
+        // when take a buffer, there should be someone waiting for a buffer so on_fly must >1
+        debug_assert!(self.on_fly > 0);
+
+        // when take a buffer, there should be at least one buffer is available
+        debug_assert!(self.available > 0);
+
+        self.on_fly -= 1;
+        self.available -= 1;
+
+        let start = buffer_id as usize * self.every_buf_size;
+        let end = start + self.every_buf_size;
+
+        let buffer_slice = &mut self.low_level_buffer[start..end];
+
+        Buffer::new(
+            self.group_id,
+            buffer_id,
+            buffer_slice.as_mut_ptr(),
+            buffer_slice.len(),
+            available_size,
+        )
+    }
+
+    pub fn increase_on_fly(&mut self) {
+        debug_assert!(self.on_fly < self.available);
+
+        self.on_fly += 1;
+    }
+
+    pub fn decrease_on_fly(&mut self) {
+        debug_assert!(self.on_fly > 0);
+
+        self.on_fly -= 1;
+    }
+
+    pub fn increase_available(&mut self) {
+        debug_assert!(
+            (self.low_level_buffer.len() / self.every_buf_size) > self.available as usize
+        );
+
+        self.available += 1;
+    }
+
+    pub fn register_state(&self) -> GroupBufferRegisterState {
+        self.register_state
+    }
+
+    /// only can use when registering -> registered
+    pub fn set_can_be_selected(&mut self) {
+        debug_assert_eq!(self.register_state, GroupBufferRegisterState::Registering);
+
+        self.register_state = GroupBufferRegisterState::Registering;
+    }
+
+    /// set a new register state and return old
+    pub fn set_register_state(
+        &mut self,
+        register_state: GroupBufferRegisterState,
+    ) -> GroupBufferRegisterState {
+        mem::replace(&mut self.register_state, register_state)
     }
 
     pub fn group_id(&self) -> u16 {
         self.group_id
+    }
+
+    pub fn low_level_buffer_addr(&mut self) -> *mut u8 {
+        self.low_level_buffer.as_mut_ptr()
+    }
+
+    pub fn low_level_buffer_by_buffer_id(&mut self, buffer_id: u16) -> *mut u8 {
+        (&mut self.low_level_buffer[(buffer_id as usize * self.every_buf_size)..]).as_mut_ptr()
+    }
+
+    pub fn low_level_buffer_len(&self) -> usize {
+        self.low_level_buffer.len()
+    }
+
+    pub fn every_buf_size(&self) -> usize {
+        self.every_buf_size
+    }
+
+    pub fn buffer_count(&self) -> usize {
+        self.low_level_buffer.len() / self.every_buf_size
+    }
+
+    fn give_back_buffer(&mut self) {
+        // when give back a buffer, there must be at least one buffer is take
+        debug_assert!(
+            (self.available as usize) < self.low_level_buffer.len() / self.every_buf_size
+        );
+
+        self.available += 1;
+    }
+}
+
+pub struct Buffer {
+    group_id: u16,
+    buffer_id: u16,
+    buf_ptr: *mut u8,
+    buf_size: usize,
+    available_size: usize,
+}
+
+impl Buffer {
+    /// when create a buffer, should make sure all arguments is valid
+    unsafe fn new(
+        group_id: u16,
+        buffer_id: u16,
+        buf_ptr: *mut u8,
+        buf_size: usize,
+        available_size: usize,
+    ) -> Self {
+        debug_assert!(available_size <= buf_size);
+
+        Self {
+            group_id,
+            buffer_id,
+            buf_ptr,
+            buf_size,
+            available_size,
+        }
+    }
+
+    pub fn low_level_buf_ptr_mut(&mut self) -> *mut u8 {
+        self.buf_ptr
+    }
+
+    pub fn group_id(&self) -> u16 {
+        self.group_id
+    }
+
+    pub fn buffer_size(&self) -> usize {
+        self.buf_size
+    }
+
+    pub fn available_size(&self) -> usize {
+        self.available_size
+    }
+
+    pub fn buffer_id(&self) -> u16 {
+        self.buffer_id
+    }
+
+    pub fn consume(&mut self, amt: usize) {
+        debug_assert!(self.available_size >= amt);
+
+        self.available_size -= amt;
     }
 }
 
@@ -42,91 +371,12 @@ impl Deref for Buffer {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &self.buffer[..self.available_len]
+        unsafe { &*ptr::slice_from_raw_parts(self.buf_ptr, self.available_size) }
     }
 }
 
 impl DerefMut for Buffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.buffer[..self.available_len]
-    }
-}
-
-#[derive(Debug)]
-pub struct GroupBuffer {
-    group_id: u16,
-    buffer_id_gen: Slab<()>,
-    available_buffers: HashMap<u16, Buffer>,
-    allocated_buffers: usize,
-    capacity_buffers: usize,
-}
-
-impl GroupBuffer {
-    /// create a GroupBuffer and pre-allocate a buffer
-    pub fn new(buf_size: u16, cap_buf: usize) -> Self {
-        assert!(cap_buf > 0);
-
-        let mut slab = Slab::new();
-        let buffer_id = slab.insert(()) as u16;
-
-        let buffer = Buffer::new(buf_size, buffer_id);
-
-        let mut available_buffers = HashMap::new();
-        available_buffers.insert(buffer_id, buffer);
-
-        Self {
-            group_id: buf_size,
-            buffer_id_gen: Default::default(),
-            available_buffers,
-            allocated_buffers: 1,
-            capacity_buffers: cap_buf,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.available_buffers.is_empty()
-    }
-
-    /// if allocated == capacity, return false
-    pub fn allocate(&mut self) -> bool {
-        if self.allocated_buffers == self.capacity_buffers {
-            false
-        } else {
-            let new_buffer_id = self.buffer_id_gen.insert(()) as u16;
-            let new_buffer = Buffer::new(self.group_id, new_buffer_id);
-
-            self.available_buffers.insert(new_buffer_id, new_buffer);
-
-            self.allocated_buffers += 1;
-
-            true
-        }
-    }
-
-    /// select a buffer by buffer_id and remove it from GroupBuffer
-    pub fn select_buffer(&mut self, buffer_id: u16) -> Option<Buffer> {
-        self.available_buffers.remove(&buffer_id)
-    }
-
-    pub fn group_id(&self) -> u16 {
-        self.group_id
-    }
-
-    pub fn register_buffer(&mut self, mut buffer: Buffer) -> Result<()> {
-        let provide_buffer_sqe = ProvideBuffers::new(
-            buffer.buffer.as_mut_ptr(),
-            buffer.buffer.len() as _,
-            1,
-            self.group_id,
-            buffer.buffer_id,
-        )
-        .build();
-
-        DRIVER.with(|driver| {
-            let mut driver = driver.borrow_mut();
-            let driver = driver.as_mut().expect("Driver is not running");
-
-            driver.register_provide_buffer(provide_buffer_sqe)
-        })
+        unsafe { &mut *ptr::slice_from_raw_parts_mut(self.buf_ptr, self.available_size) }
     }
 }

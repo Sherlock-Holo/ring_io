@@ -13,9 +13,9 @@ use io_uring::opcode::Read as RingRead;
 use io_uring::opcode::Write as RingWrite;
 use io_uring::types::Fd;
 
-use crate::buffer::{Buffer, GroupBuffer};
+use crate::buffer::Buffer;
 use crate::cqe_ext::EntryExt;
-use crate::driver::{CancelCallback, DRIVER};
+use crate::driver::DRIVER;
 
 enum ReadState {
     Idle(usize),
@@ -86,14 +86,15 @@ impl AsyncBufRead for TcpStream {
             ReadState::Idle(mut want_size) => {
                 // if choose group id is 0, means call poll_fill_buf directly
                 if want_size == 0 {
-                    want_size = 65535;
+                    want_size = 65536;
+                } else {
+                    want_size = want_size.next_power_of_two();
                 }
-
-                let group_id = want_size.next_power_of_two().min(65535) as u16;
 
                 BufRead {
                     tcp_fd: self.std_stream.as_raw_fd(),
-                    group_id,
+                    want_buf_size: want_size,
+                    group_id: None,
                     user_data: None,
                 }
             }
@@ -143,13 +144,7 @@ impl AsyncBufRead for TcpStream {
                         let mut driver = driver.borrow_mut();
                         let driver = driver.as_mut().expect("Driver is not running");
 
-                        let group_buffer = driver
-                            .buffers
-                            .get_mut(&buffer.group_id())
-                            .expect("GroupBuffer not found");
-
-                        // ignore register failed
-                        let _ = group_buffer.register_buffer(buffer);
+                        driver.give_back_buffer(buffer);
                     });
                 } else {
                     unreachable!()
@@ -265,21 +260,10 @@ impl Future for Write {
                 let mut driver = driver.borrow_mut();
                 let driver = driver.as_mut().expect("Driver is not running");
 
-                match driver.available_entries.remove(&user_data) {
-                    None => {
-                        *driver
-                            .wakers
-                            .get_mut(&user_data)
-                            .expect("inserted write waker not found") = cx.waker().clone();
-
-                        Ok::<_, Error>(None)
-                    }
-                    Some(write_cqe) => {
-                        let write_cqe = write_cqe.ok()?;
-
-                        Ok(Some(write_cqe))
-                    }
-                }
+                driver
+                    .take_cqe_with_waker(user_data, cx.waker())
+                    .map(|cqe| cqe.ok())
+                    .transpose()
             })?;
 
             return match write_cqe {
@@ -300,7 +284,7 @@ impl Future for Write {
             let mut driver = driver.borrow_mut();
             let driver = driver.as_mut().expect("Driver is not running");
 
-            driver.push_sqe(write_sqe, cx.waker().clone())
+            driver.push_sqe_with_waker(write_sqe, cx.waker().clone())
         })?;
 
         user_data.map(|user_data| self.user_data.replace(user_data));
@@ -317,12 +301,7 @@ impl Drop for Write {
                 match driver.as_mut() {
                     None => {}
                     Some(driver) => {
-                        driver.cancel_user_data.insert(
-                            user_data,
-                            CancelCallback::CancelWithoutCallback { user_data },
-                        );
-
-                        let _ = driver.cancel_sqe(user_data);
+                        let _ = driver.cancel_normal(user_data);
                     }
                 }
             })
@@ -332,7 +311,8 @@ impl Drop for Write {
 
 pub struct BufRead {
     tcp_fd: RawFd,
-    group_id: u16,
+    want_buf_size: usize,
+    group_id: Option<u16>,
     user_data: Option<u64>,
 }
 
@@ -340,116 +320,131 @@ impl Future for BufRead {
     type Output = Result<Buffer>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(user_data) = self.user_data {
-            let buffer = DRIVER.with(|driver| {
-                let mut driver = driver.borrow_mut();
-                let driver = driver.as_mut().expect("Driver is not running");
+        match (self.group_id, self.user_data) {
+            (Some(group_id), Some(user_data)) => {
+                let buffer = DRIVER.with(|driver| {
+                    let mut driver = driver.borrow_mut();
+                    let driver = driver.as_mut().expect("Driver is not running");
 
-                match driver.available_entries.remove(&user_data) {
-                    None => {
-                        *driver
-                            .wakers
-                            .get_mut(&user_data)
-                            .expect("inserted read waker not found") = cx.waker().clone();
+                    match driver.take_cqe_with_waker(user_data, cx.waker()) {
+                        None => Ok(None),
+                        Some(cqe) => {
+                            // although read is error, we also need to check if buffer is used or not
+                            if cqe.is_err() {
+                                if let Some(buffer_id) = buffer_select(cqe.flags()) {
+                                    let buffer = driver.take_buffer(
+                                        self.want_buf_size,
+                                        group_id,
+                                        buffer_id,
+                                        0,
+                                    );
+                                    driver.give_back_buffer(buffer);
+                                }
 
-                        Ok::<_, Error>(None)
+                                return Err(Error::from_raw_os_error(-cqe.result()));
+                            }
+
+                            let buffer_id =
+                                buffer_select(cqe.flags()).expect("read success but no buffer id");
+
+                            Ok(Some(driver.take_buffer(
+                                self.want_buf_size,
+                                group_id,
+                                buffer_id,
+                                cqe.result() as _,
+                            )))
+                        }
                     }
-                    Some(read_cqe) => {
-                        let read_cqe = read_cqe.ok()?;
+                })?;
 
-                        let buffer_id = buffer_select(read_cqe.flags())
-                            .expect("buffer id is not in Read flags");
+                match buffer {
+                    None => Poll::Pending,
+                    Some(buffer) => {
+                        // drop won't send useless cancel
+                        self.user_data.take();
 
-                        let group_buffers = driver
-                            .buffers
-                            .get_mut(&self.group_id)
-                            .expect("group buffer not found");
-
-                        let mut buffer = group_buffers
-                            .select_buffer(buffer_id)
-                            .expect("buffer not found");
-
-                        buffer.set_available_len(read_cqe.result() as usize);
-
-                        Ok(Some(buffer))
-                    }
-                }
-            })?;
-
-            return match buffer {
-                None => Poll::Pending,
-                Some(buffer) => {
-                    // drop won't send useless cancel
-                    self.user_data.take();
-
-                    Poll::Ready(Ok(buffer))
-                }
-            };
-        }
-
-        let ring_read = RingRead::new(Fd(self.tcp_fd), ptr::null_mut(), self.group_id as _);
-
-        let user_data = DRIVER.with(|driver| {
-            let mut driver = driver.borrow_mut();
-            let driver = driver.as_mut().expect("Driver is not running");
-
-            let mut group_buffer;
-
-            loop {
-                group_buffer = driver
-                    .buffers
-                    .entry(self.group_id)
-                    .or_insert_with(|| GroupBuffer::new(self.group_id, 10));
-
-                if group_buffer.is_empty() {
-                    if group_buffer.allocate() {
-                        break;
-                    }
-
-                    // max group_id is 65535
-                    if self.group_id == 65535 {
-                        driver.wait_for_push_wakers.push_back(cx.waker().clone());
-
-                        return Ok(None);
-                    } else if self.group_id == 32768 {
-                        self.group_id = 65535;
-                    } else {
-                        self.group_id *= 2;
+                        Poll::Ready(Ok(buffer))
                     }
                 }
             }
 
-            let read_sqe = ring_read.buf_group(group_buffer.group_id()).build();
+            (None, Some(_)) => unreachable!(),
 
-            driver.push_sqe(read_sqe, cx.waker().clone())
-        })?;
+            (Some(group_id), None) => {
+                let sqe = RingRead::new(Fd(self.tcp_fd), ptr::null_mut(), self.want_buf_size as _)
+                    .buf_group(group_id)
+                    .build();
 
-        user_data.map(|user_data| self.user_data.replace(user_data));
+                let user_data = DRIVER.with(|driver| {
+                    let mut driver = driver.borrow_mut();
+                    let driver = driver.as_mut().expect("Driver is not running");
 
-        Poll::Pending
+                    driver.push_sqe_with_waker(sqe, cx.waker().clone())
+                })?;
+
+                user_data.map(|user_data| self.user_data.replace(user_data));
+
+                Poll::Pending
+            }
+
+            (None, None) => {
+                let (group_id, user_data) = DRIVER.with(|driver| {
+                    let mut driver = driver.borrow_mut();
+                    let driver = driver.as_mut().expect("Driver is not running");
+
+                    let group_id = driver.select_group_buffer(self.want_buf_size, cx.waker())?;
+
+                    match group_id {
+                        None => Ok::<_, Error>((None, None)),
+                        Some(group_id) => {
+                            let sqe = RingRead::new(
+                                Fd(self.tcp_fd),
+                                ptr::null_mut(),
+                                self.want_buf_size as _,
+                            )
+                            .buf_group(group_id)
+                            .build();
+
+                            let user_data = driver.push_sqe_with_waker(sqe, cx.waker().clone())?;
+
+                            Ok((Some(group_id), user_data))
+                        }
+                    }
+                })?;
+
+                if let Some(group_id) = group_id {
+                    self.group_id.replace(group_id);
+
+                    user_data.map(|user_data| self.user_data.replace(user_data));
+                }
+
+                Poll::Pending
+            }
+        }
     }
 }
 
 impl Drop for BufRead {
     fn drop(&mut self) {
-        if let Some(user_data) = self.user_data {
-            DRIVER.with(|driver| {
-                let mut driver = driver.borrow_mut();
-                match driver.as_mut() {
-                    None => {}
-                    Some(driver) => {
-                        driver.cancel_user_data.insert(
-                            user_data,
-                            CancelCallback::CancelAndRegisterBuffer {
-                                user_data,
-                                group_id: self.group_id,
-                            },
-                        );
-
-                        let _ = driver.cancel_sqe(user_data);
+        DRIVER.with(|driver| {
+            let mut driver = driver.borrow_mut();
+            match driver.as_mut() {
+                None => {}
+                Some(driver) => match (self.group_id, self.user_data) {
+                    (Some(group_id), Some(user_data)) => {
+                        let _ = driver.cancel_read(user_data, group_id);
                     }
-                }
-            })
-        }
+
+                    (Some(group_id), None) => {
+                        driver
+                            .decrease_on_fly_for_not_use_group_buffer(self.want_buf_size, group_id);
+                    }
+
+                    (None, Some(_)) => unreachable!(),
+
+                    (None, None) => {}
+                },
+            }
+        })
     }
 }

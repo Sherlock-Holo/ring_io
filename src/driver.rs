@@ -5,28 +5,36 @@ use std::task::Waker;
 use std::time::Duration;
 
 use io_uring::cqueue::Entry as CqEntry;
-use io_uring::opcode::AsyncCancel;
+use io_uring::opcode::{AsyncCancel, ProvideBuffers};
 use io_uring::squeue::Entry as SqEntry;
 use io_uring::IoUring;
 
-use crate::buffer::GroupBuffer;
+use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
+
+#[derive(Debug, Clone)]
+pub enum Callback {
+    ProvideBuffer { group_id: u16 },
+
+    CancelRead { group_id: u16 },
+
+    Wakeup { waker: Waker },
+}
 
 pub struct Driver {
     pub ring: IoUring,
 
-    /// use to provider buffer for io_uring ProvideBuffer
-    pub buffers: HashMap<u16, GroupBuffer>,
     pub next_user_data: u64,
-
-    /// wake up the task
-    pub wakers: HashMap<u64, Waker>,
 
     /// when sq is full, store the waker, after consume cqe, wake all of them
     pub wait_for_push_wakers: VecDeque<Waker>,
-    pub available_entries: HashMap<u64, CqEntry>,
 
-    /// when a sqe want to cancel, register its user_data and callback
-    pub cancel_user_data: HashMap<u64, CancelCallback>,
+    pub buffer_manager: BufferManager,
+
+    pub completion_queue_entries: HashMap<u64, CqEntry>,
+
+    pub callbacks: HashMap<u64, Callback>,
+
+    pub background_sqes: VecDeque<SqEntry>,
 }
 
 impl Driver {
@@ -43,21 +51,146 @@ impl Driver {
 
         Ok(Self {
             ring,
-            buffers: Default::default(),
             next_user_data: 1,
-            wakers: Default::default(),
             wait_for_push_wakers: Default::default(),
-            available_entries: Default::default(),
-            cancel_user_data: Default::default(),
+            buffer_manager: BufferManager::new(),
+            completion_queue_entries: Default::default(),
+            callbacks: Default::default(),
+            background_sqes: Default::default(),
         })
     }
 
-    /// try to push sqe into ring and return user_data, if push success
-    pub fn push_sqe(&mut self, sqe: SqEntry, waker: Waker) -> Result<Option<u64>> {
+    pub fn select_group_buffer(
+        &mut self,
+        buffer_size: usize,
+        waker: &Waker,
+    ) -> Result<Option<u16>> {
+        let group_buffer = self.buffer_manager.select_group_buffer(buffer_size);
+
+        if group_buffer.register_state() == GroupBufferRegisterState::Registered {
+            group_buffer.increase_on_fly();
+
+            return Ok(Some(group_buffer.group_id()));
+        } else if group_buffer.register_state() == GroupBufferRegisterState::Registering {
+            // reduce group buffer allocate, if found registering group buffer, let task wait
+            self.wait_for_push_wakers.push_back(waker.clone());
+
+            return Ok(None);
+        }
+
+        // no available group buffer found, save the waker at first
+        self.wait_for_push_wakers.push_back(waker.clone());
+
         let user_data = self.next_user_data;
         self.next_user_data += 1;
 
-        let sqe = sqe.user_data(user_data);
+        let provide_buffer_sqe = ProvideBuffers::new(
+            group_buffer.low_level_buffer_addr(),
+            group_buffer.every_buf_size() as _,
+            group_buffer.buffer_count() as _,
+            group_buffer.group_id(),
+            0,
+        )
+        .build()
+        .user_data(user_data);
+
+        // register the group buffer
+        unsafe {
+            if self.ring.submission().push(&provide_buffer_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&provide_buffer_sqe).is_err() {
+                    return Ok(None);
+                }
+            }
+
+            self.ring.submit()?;
+        }
+
+        self.callbacks.insert(
+            user_data,
+            Callback::ProvideBuffer {
+                group_id: group_buffer.group_id(),
+            },
+        );
+
+        group_buffer.set_register_state(GroupBufferRegisterState::Registering);
+
+        Ok(None)
+    }
+
+    pub fn take_buffer(
+        &mut self,
+        buffer_size: usize,
+        group_id: u16,
+        buffer_id: u16,
+        buffer_data_size: usize,
+    ) -> Buffer {
+        self.buffer_manager
+            .take_buffer(buffer_size, group_id, buffer_id, buffer_data_size)
+    }
+
+    pub fn give_back_buffer(&mut self, mut buffer: Buffer) {
+        let low_level_buf_ptr_mut = buffer.low_level_buf_ptr_mut();
+        let group_id = buffer.group_id();
+        let buffer_id = buffer.buffer_id();
+        let buffer_size = buffer.buffer_size();
+
+        let user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let provide_buffer_sqe = ProvideBuffers::new(
+            low_level_buf_ptr_mut,
+            buffer_size as _,
+            1,
+            buffer_id,
+            group_id,
+        )
+        .build()
+        .user_data(user_data);
+
+        self.buffer_manager.give_back_buffer(buffer);
+
+        self.background_sqes.push_back(provide_buffer_sqe);
+
+        self.callbacks
+            .insert(user_data, Callback::ProvideBuffer { group_id });
+    }
+
+    pub fn give_back_buffer_with_id(&mut self, group_id: u16, buffer_id: u16) {
+        let group_buffer = self
+            .buffer_manager
+            .group_buffer_mut(group_id)
+            .unwrap_or_else(|| panic!("group buffer {} not found", group_id));
+
+        group_buffer.decrease_on_fly();
+
+        let ptr_mut = group_buffer.low_level_buffer_by_buffer_id(buffer_id);
+        let len = group_buffer.every_buf_size();
+
+        let user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let provide_buffer_sqe = ProvideBuffers::new(ptr_mut, len as _, 1, buffer_id, group_id)
+            .build()
+            .user_data(user_data);
+
+        self.background_sqes.push_back(provide_buffer_sqe);
+
+        self.callbacks
+            .insert(user_data, Callback::ProvideBuffer { group_id });
+    }
+
+    pub fn decrease_on_fly_for_not_use_group_buffer(&mut self, buffer_size: usize, group_id: u16) {
+        self.buffer_manager
+            .decrease_on_fly_for_not_use_group_buffer(buffer_size, group_id);
+    }
+
+    pub fn push_sqe_with_waker(&mut self, mut sqe: SqEntry, waker: Waker) -> Result<Option<u64>> {
+        let user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        sqe = sqe.user_data(user_data);
 
         unsafe {
             if self.ring.submission().push(&sqe).is_err() {
@@ -71,7 +204,7 @@ impl Driver {
                 }
             }
 
-            self.wakers.insert(user_data, waker);
+            self.callbacks.insert(user_data, Callback::Wakeup { waker });
 
             self.ring.submit()?;
 
@@ -79,55 +212,110 @@ impl Driver {
         }
     }
 
-    /*/// this will keep trying pushing sqe until success or error happened
-    pub fn push_sqe_without_waker(&mut self, sqe: SqEntry) -> Result<u64> {
-        let user_data = self.next_user_data;
-        self.next_user_data += 1;
-
-        let sqe = sqe.user_data(user_data);
-
-        loop {
-            unsafe {
-                let result = self.ring.submission().push(&sqe);
+    pub fn push_sqe(&mut self, sqe: &SqEntry) -> Result<bool> {
+        unsafe {
+            if self.ring.submission().push(sqe).is_err() {
                 self.ring.submit()?;
 
-                if result.is_ok() {
-                    return Ok(user_data);
+                // sq is still full, push in next times
+                if self.ring.submission().push(sqe).is_err() {
+                    return Ok(false);
                 }
             }
-        }
-    }*/
 
-    pub fn cancel_sqe(&mut self, user_data: u64) -> Result<()> {
+            self.ring.submit()?;
+
+            Ok(true)
+        }
+    }
+
+    /// cancel a event without any callback
+    pub fn cancel_normal(&mut self, user_data: u64) -> Result<()> {
         let cancel_sqe = AsyncCancel::new(user_data).build();
 
-        self.push_sqe_without_waker_or_user_data(cancel_sqe)
-    }
-
-    pub fn register_provide_buffer(&mut self, sqe: SqEntry) -> Result<()> {
-        self.push_sqe_without_waker_or_user_data(sqe)
-    }
-
-    fn push_sqe_without_waker_or_user_data(&mut self, sqe: SqEntry) -> Result<()> {
-        loop {
-            unsafe {
-                let result = self.ring.submission().push(&sqe);
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
                 self.ring.submit()?;
 
-                if result.is_ok() {
-                    return Ok(());
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        self.callbacks.remove(&user_data);
+
+        Ok(())
+    }
+
+    /// cancel the read event, when the event canceled or ready after cancel, give back the buffer
+    /// if buffer is used
+    pub fn cancel_read(&mut self, user_data: u64, group_id: u16) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelRead
+        self.callbacks
+            .insert(user_data, Callback::CancelRead { group_id });
+
+        Ok(())
+    }
+
+    pub fn take_cqe_with_waker(&mut self, user_data: u64, waker: &Waker) -> Option<CqEntry> {
+        match self.completion_queue_entries.remove(&user_data) {
+            None => {
+                self.callbacks.insert(
+                    user_data,
+                    Callback::Wakeup {
+                        waker: waker.clone(),
+                    },
+                );
+
+                None
+            }
+
+            Some(cqe) => {
+                self.callbacks.remove(&user_data);
+
+                Some(cqe)
+            }
+        }
+    }
+
+    pub fn take_callback(&mut self, user_data: u64) -> Option<Callback> {
+        self.callbacks.remove(&user_data)
+    }
+
+    pub fn try_run_all_wait_sqes(&mut self) {
+        self.background_sqes
+            .drain(..)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .for_each(|sqe| {
+                if !self
+                    .push_sqe(&sqe)
+                    .unwrap_or_else(|err| panic!("push sqe failed: {}", err))
+                {
+                    self.background_sqes.push_back(sqe);
+                }
+            });
     }
 }
 
 thread_local! {
     pub static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
-}
-
-#[must_use]
-pub enum CancelCallback {
-    CancelWithoutCallback { user_data: u64 },
-    CancelAndRegisterBuffer { user_data: u64, group_id: u16 },
 }

@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::{Error, Result};
+use std::io::Result;
 use std::net::{TcpListener as StdTcpListener, ToSocketAddrs};
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
@@ -10,7 +10,7 @@ use io_uring::opcode::Accept as RingAccept;
 use io_uring::types::Fd;
 
 use crate::cqe_ext::EntryExt;
-use crate::driver::{CancelCallback, DRIVER};
+use crate::driver::DRIVER;
 use crate::net::tcp::tcp_stream::TcpStream;
 
 #[derive(Debug)]
@@ -48,22 +48,10 @@ impl<'a> Future for Accept<'a> {
                 let mut driver = driver.borrow_mut();
                 let driver = driver.as_mut().expect("Driver is not running");
 
-                match driver.available_entries.remove(&user_data) {
-                    None => {
-                        *driver
-                            .wakers
-                            .get_mut(&user_data)
-                            .expect("inserted accept waker not found") = cx.waker().clone();
-
-                        Ok::<_, Error>(None)
-                    }
-
-                    Some(accept_cqe) => {
-                        let accept_cqe = accept_cqe.ok()?;
-
-                        Ok(Some(accept_cqe))
-                    }
-                }
+                driver
+                    .take_cqe_with_waker(user_data, cx.waker())
+                    .map(|cqe| cqe.ok())
+                    .transpose()
             })?;
 
             return match accept_cqe {
@@ -87,7 +75,7 @@ impl<'a> Future for Accept<'a> {
             let mut driver = driver.borrow_mut();
             let driver = driver.as_mut().expect("Driver is not running");
 
-            driver.push_sqe(accept_sqe, cx.waker().clone())
+            driver.push_sqe_with_waker(accept_sqe, cx.waker().clone())
         })?;
 
         user_data.map(|user_data| self.user_data.replace(user_data));
@@ -104,12 +92,7 @@ impl<'a> Drop for Accept<'a> {
                 match driver.as_mut() {
                     None => {}
                     Some(driver) => {
-                        driver.cancel_user_data.insert(
-                            user_data,
-                            CancelCallback::CancelWithoutCallback { user_data },
-                        );
-
-                        let _ = driver.cancel_sqe(user_data);
+                        let _ = driver.cancel_normal(user_data);
                     }
                 }
             })
