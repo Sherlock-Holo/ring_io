@@ -372,6 +372,9 @@ impl Buffer {
     }
 }
 
+// only safe in the main block_on thread
+unsafe impl Send for Buffer {}
+
 impl Deref for Buffer {
     type Target = [u8];
 

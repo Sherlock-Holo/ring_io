@@ -1,11 +1,16 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::io::Error;
+use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
-use async_task::{Runnable, Task};
+use async_task::{Runnable, Task as AsyncTask};
+use futures_util::task::AtomicWaker;
+use futures_util::FutureExt;
 use io_uring::cqueue::buffer_select;
 use nix::unistd;
 
@@ -61,8 +66,8 @@ fn init_task_sender_and_receiver() -> bool {
 
 pub fn block_on<F, O>(fut: F) -> O
 where
-    F: Future<Output = O> + 'static,
-    O: 'static,
+    F: Future<Output = O> + 'static + Send,
+    O: 'static + Send,
 {
     const MAX_RUN_TASK_COUNT: u8 = 64;
 
@@ -71,7 +76,7 @@ where
 
     let (sender, receiver) = mpsc::sync_channel(1);
 
-    spawn_local(async move {
+    spawn(async move {
         let result = fut.await;
         sender.send(result).unwrap();
     })
@@ -237,10 +242,61 @@ where
     }
 }
 
-pub fn spawn_local<F, O>(fut: F) -> Task<O>
+enum InnerTask<O> {
+    AsyncTask(AsyncTask<O>),
+    BlockTask(Receiver<O>, Arc<AtomicWaker>),
+}
+
+pub struct Task<O> {
+    inner: InnerTask<O>,
+}
+
+impl<O> Task<O> {
+    pub async fn cancel(self) -> Option<O> {
+        match self.inner {
+            InnerTask::AsyncTask(task) => task.cancel().await,
+            InnerTask::BlockTask(receiver, _) => receiver.try_recv().ok(),
+        }
+    }
+
+    pub fn detach(self) {
+        if let InnerTask::AsyncTask(task) = self.inner {
+            task.detach();
+        }
+        // when receiver drop, the sender will send failed, but who care
+    }
+}
+
+impl<O> Future for Task<O>
 where
-    F: Future<Output = O> + 'static,
     O: 'static,
+{
+    type Output = O;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut self.get_mut().inner;
+
+        match this {
+            InnerTask::AsyncTask(task) => task.poll_unpin(cx),
+            InnerTask::BlockTask(receiver, atomic_waker) => match receiver.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    atomic_waker.register(cx.waker());
+
+                    Poll::Pending
+                }
+
+                Err(TryRecvError::Disconnected) => panic!("blocking task is interrupt"),
+
+                Ok(result) => Poll::Ready(result),
+            },
+        }
+    }
+}
+
+pub fn spawn<F, O>(fut: F) -> Task<O>
+where
+    F: Future<Output = O> + 'static + Send,
+    O: 'static + Send,
 {
     let schedule = |runnable| {
         TASK_SENDER.with(|task_sender| {
@@ -251,11 +307,52 @@ where
         })
     };
 
-    let (runnable, task) = async_task::spawn_local(fut, schedule);
+    let (runnable, task) = async_task::spawn(fut, schedule);
 
     runnable.schedule();
 
-    task
+    Task {
+        inner: InnerTask::AsyncTask(task),
+    }
+}
+
+pub fn spawn_blocking<O, F>(f: F) -> Task<O>
+where
+    O: 'static + Send + Sync,
+    F: FnOnce() -> O + 'static + Send + Sync,
+{
+    let (tx, rx) = mpsc::channel();
+
+    // allow the blocking thread send result back to the main thread
+    let main_thread_task_sender = TASK_SENDER.with(|task_sender| {
+        let mut task_sender = task_sender.borrow_mut();
+        let task_sender = task_sender.as_mut().expect("task sender not init");
+
+        task_sender.clone()
+    });
+
+    let waker = Arc::new(AtomicWaker::new());
+
+    {
+        let waker = waker.clone();
+
+        thread::spawn(move || {
+            TASK_SENDER.with(|task_sender| {
+                let mut task_sender = task_sender.borrow_mut();
+                if task_sender.is_none() {
+                    task_sender.replace(main_thread_task_sender);
+                }
+            });
+
+            if tx.send(f()).is_ok() {
+                waker.wake();
+            }
+        });
+    }
+
+    Task {
+        inner: InnerTask::BlockTask(rx, waker),
+    }
 }
 
 #[cfg(test)]
@@ -281,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_span() {
+    fn test_simple_spawn() {
         let n = block_on(async {
-            let task = spawn_local(async { 1 });
+            let task = spawn(async { 1 });
 
             task.await
         });
@@ -292,15 +389,44 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_span() {
+    fn test_multi_spawn() {
         let (n1, n2) = block_on(async {
-            let task1 = spawn_local(async { 1 });
-            let task2 = spawn_local(async { 2 });
+            let task1 = spawn(async { 1 });
+            let task2 = spawn(async { 2 });
 
             (task1.await, task2.await)
         });
 
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
+    }
+
+    #[test]
+    fn test_spawn_blocking() {
+        let (n1, n2, n3) = block_on(async {
+            let task3 = spawn_blocking(|| {
+                thread::sleep(Duration::from_secs(1));
+
+                3
+            });
+
+            let task1 = spawn(async { 1 });
+            let task2 = spawn(async { 2 });
+
+            let n1 = task1.await;
+            dbg!(n1);
+
+            let n2 = task2.await;
+            dbg!(n2);
+
+            let n3 = task3.await;
+            dbg!(n3);
+
+            (n1, n2, n3)
+        });
+
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 2);
+        assert_eq!(n3, 3);
     }
 }
