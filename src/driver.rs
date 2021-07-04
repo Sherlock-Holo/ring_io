@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::Result;
+use std::os::unix::io::RawFd;
 use std::task::Waker;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
 use io_uring::squeue::Entry as SqEntry;
 use io_uring::IoUring;
+use nix::sys::socket::SockAddr;
 
 use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
 
@@ -16,6 +18,9 @@ pub enum Callback {
     ProvideBuffer { group_id: u16 },
 
     CancelRead { group_id: u16 },
+
+    // safe the addr in Box so no matter how move the addr, won't break the pointer
+    CancelConnect { addr: Box<SockAddr>, fd: RawFd },
 
     Wakeup { waker: Waker },
 }
@@ -271,6 +276,33 @@ impl Driver {
         // change the callback to CancelRead
         self.callbacks
             .insert(user_data, Callback::CancelRead { group_id });
+
+        Ok(())
+    }
+
+    /// cancel the read event, when the event canceled or ready after cancel, give back the buffer
+    /// if buffer is used
+    pub fn cancel_connect(&mut self, user_data: u64, addr: Box<SockAddr>, fd: RawFd) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelConnect
+        self.callbacks
+            .insert(user_data, Callback::CancelConnect { addr, fd });
 
         Ok(())
     }

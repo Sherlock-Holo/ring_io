@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::ops::{Deref, DerefMut};
-use std::{mem, ptr};
+use std::{fmt, mem, ptr};
 
 use slab::Slab;
 
@@ -201,6 +202,18 @@ pub struct GroupBuffer {
     register_state: GroupBufferRegisterState,
 }
 
+impl Debug for GroupBuffer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GroupBuffer")
+            .field("group_id", &self.group_id)
+            .field("every_buf_size", &self.every_buf_size)
+            .field("on_fly", &self.on_fly)
+            .field("available", &self.available)
+            .field("register_state", &self.register_state)
+            .finish()
+    }
+}
+
 impl GroupBuffer {
     fn new(group_id: u16, buf_len: usize) -> Self {
         let low_level_buffer = vec![0; buf_len * EVERY_GROUP_BUFFER_BUFFER_COUNT];
@@ -267,7 +280,9 @@ impl GroupBuffer {
     pub fn set_can_be_selected(&mut self) {
         debug_assert_eq!(self.register_state, GroupBufferRegisterState::Registering);
 
-        self.register_state = GroupBufferRegisterState::Registering;
+        self.available = (self.low_level_buffer.len() / self.every_buf_size) as _;
+
+        self.register_state = GroupBufferRegisterState::Registered;
     }
 
     /// set a new register state and return old
@@ -290,10 +305,6 @@ impl GroupBuffer {
         (&mut self.low_level_buffer[(buffer_id as usize * self.every_buf_size)..]).as_mut_ptr()
     }
 
-    pub fn low_level_buffer_len(&self) -> usize {
-        self.low_level_buffer.len()
-    }
-
     pub fn every_buf_size(&self) -> usize {
         self.every_buf_size
     }
@@ -307,8 +318,6 @@ impl GroupBuffer {
         debug_assert!(
             (self.available as usize) < self.low_level_buffer.len() / self.every_buf_size
         );
-
-        self.available += 1;
     }
 }
 
@@ -350,10 +359,6 @@ impl Buffer {
 
     pub fn buffer_size(&self) -> usize {
         self.buf_size
-    }
-
-    pub fn available_size(&self) -> usize {
-        self.available_size
     }
 
     pub fn buffer_id(&self) -> u16 {

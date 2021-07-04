@@ -15,4 +15,4 @@ slab = "0.4"
 async-task = "4.0"
 
 [dev-dependencies]
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["io"] }

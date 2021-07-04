@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use async_task::{Runnable, Task};
 use io_uring::cqueue::buffer_select;
+use nix::unistd;
 
 use crate::buffer::GroupBufferRegisterState;
 use crate::cqe_ext::EntryExt;
@@ -164,6 +165,10 @@ where
                                     driver.give_back_buffer_with_id(group_id, buffer_id);
                                 }
                             }
+
+                            Callback::CancelConnect { addr: _, fd } => {
+                                let _ = unistd::close(fd);
+                            }
                         }
 
                         continue;
@@ -206,6 +211,10 @@ where
                                 buffer_select(cqe.flags()).expect("buffer id not found");
 
                             driver.give_back_buffer_with_id(group_id, buffer_id);
+                        }
+
+                        Callback::CancelConnect { addr: _, fd } => {
+                            let _ = unistd::close(fd);
                         }
                     }
                 }
