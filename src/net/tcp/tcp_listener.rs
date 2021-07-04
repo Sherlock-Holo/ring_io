@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::Result;
 use std::net::{SocketAddr, TcpListener as StdTcpListener, ToSocketAddrs};
-use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::ptr;
 use std::task::{Context, Poll};
@@ -13,6 +13,7 @@ use nix::sys::socket::SockAddr;
 
 use crate::cqe_ext::EntryExt;
 use crate::driver::DRIVER;
+use crate::io::ring_fd::RingFd;
 use crate::net::tcp::tcp_stream::TcpStream;
 use crate::nix_error::NixErrorExt;
 
@@ -88,7 +89,7 @@ impl<'a> Future for Accept<'a> {
                     let tcp_fd = accept_cqe.result();
 
                     // Safety: fd is valid
-                    Poll::Ready(Ok(unsafe { TcpStream::new(tcp_fd) }))
+                    Poll::Ready(Ok(unsafe { TcpStream::new(RingFd::from_raw_fd(tcp_fd)) }))
                 }
             };
         }
