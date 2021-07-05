@@ -265,6 +265,12 @@ impl AsyncWrite for RingFd {
     }
 
     fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if !self.need_close_fd {
+            return Poll::Ready(Ok(()));
+        }
+
+        self.need_close_fd = false;
+
         let write_state = mem::replace(&mut self.write_state, WriteState::NotInit);
         if let WriteState::Writing(write_fut) = write_state {
             drop(write_fut);

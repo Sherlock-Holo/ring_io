@@ -661,4 +661,26 @@ mod tests {
             assert_eq!(n, 0);
         })
     }
+
+    #[test]
+    fn test_async_close() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+
+            connect_stream.close().await.unwrap();
+
+            let n = accept_stream.read(&mut [0; 1]).unwrap();
+
+            assert_eq!(n, 0);
+        })
+    }
 }
