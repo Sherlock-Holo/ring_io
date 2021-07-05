@@ -185,8 +185,9 @@ where
                         Callback::ProvideBuffer { group_id } => {
                             if cqe.is_err() {
                                 panic!(
-                                    "unexpect error for ProvideBuffers {}",
-                                    Error::from_raw_os_error(-cqe.result())
+                                    "unexpect error for ProvideBuffers {}, user_data {}",
+                                    Error::from_raw_os_error(-cqe.result()),
+                                    user_data
                                 );
                             }
 

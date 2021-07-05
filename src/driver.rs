@@ -94,7 +94,7 @@ impl Driver {
             group_buffer.every_buf_size() as _,
             group_buffer.buffer_count() as _,
             group_buffer.group_id(),
-            0,
+            1,
         )
         .build()
         .user_data(user_data);

@@ -35,17 +35,7 @@ impl BufferManager {
 
         self.group_buffers
             .entry(want_buffer_size)
-            .or_insert_with(|| {
-                let mut group_buffers = GroupBuffers::new(want_buffer_size);
-
-                let new_group_id = group_id_gen.insert(()) as u16;
-
-                let group_buffer = GroupBuffer::new(new_group_id, want_buffer_size);
-
-                group_buffers.insert_new_group_buffer(new_group_id, group_buffer);
-
-                group_buffers
-            })
+            .or_insert_with(|| GroupBuffers::new(want_buffer_size))
             .select_group_buffer(group_id_gen)
     }
 
@@ -238,7 +228,7 @@ impl GroupBuffer {
         self.on_fly -= 1;
         self.available -= 1;
 
-        let start = buffer_id as usize * self.every_buf_size;
+        let start = (buffer_id - 1) as usize * self.every_buf_size;
         let end = start + self.every_buf_size;
 
         let buffer_slice = &mut self.low_level_buffer[start..end];

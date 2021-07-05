@@ -229,210 +229,6 @@ impl Drop for Connect {
     }
 }
 
-// pub struct Write {
-//     tcp_fd: RawFd,
-//     write_buffer: Vec<u8>,
-//     data_size: u32,
-//     user_data: Option<u64>,
-// }
-//
-// impl Future for Write {
-//     type Output = Result<usize>;
-//
-//     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//         if let Some(user_data) = self.user_data {
-//             let write_cqe = DRIVER.with(|driver| {
-//                 let mut driver = driver.borrow_mut();
-//                 let driver = driver.as_mut().expect("Driver is not running");
-//
-//                 driver
-//                     .take_cqe_with_waker(user_data, cx.waker())
-//                     .map(|cqe| cqe.ok())
-//                     .transpose()
-//             })?;
-//
-//             return match write_cqe {
-//                 None => Poll::Pending,
-//                 Some(write_cqe) => {
-//                     // drop won't send useless cancel
-//                     self.user_data.take();
-//
-//                     Poll::Ready(Ok(write_cqe.result() as _))
-//                 }
-//             };
-//         }
-//
-//         let write_sqe =
-//             RingWrite::new(Fd(self.tcp_fd), self.write_buffer.as_ptr(), self.data_size).build();
-//
-//         let user_data = DRIVER.with(|driver| {
-//             let mut driver = driver.borrow_mut();
-//             let driver = driver.as_mut().expect("Driver is not running");
-//
-//             driver.push_sqe_with_waker(write_sqe, cx.waker().clone())
-//         })?;
-//
-//         user_data.map(|user_data| self.user_data.replace(user_data));
-//
-//         Poll::Pending
-//     }
-// }
-//
-// impl Drop for Write {
-//     fn drop(&mut self) {
-//         if let Some(user_data) = self.user_data {
-//             DRIVER.with(|driver| {
-//                 let mut driver = driver.borrow_mut();
-//                 match driver.as_mut() {
-//                     None => {}
-//                     Some(driver) => {
-//                         let _ = driver.cancel_normal(user_data);
-//                     }
-//                 }
-//             })
-//         }
-//     }
-// }
-//
-// struct BufRead {
-//     tcp_fd: RawFd,
-//     want_buf_size: usize,
-//     group_id: Option<u16>,
-//     user_data: Option<u64>,
-// }
-//
-// impl Future for BufRead {
-//     type Output = Result<Buffer>;
-//
-//     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-//         match (self.group_id, self.user_data) {
-//             (Some(group_id), Some(user_data)) => {
-//                 let buffer = DRIVER.with(|driver| {
-//                     let mut driver = driver.borrow_mut();
-//                     let driver = driver.as_mut().expect("Driver is not running");
-//
-//                     match driver.take_cqe_with_waker(user_data, cx.waker()) {
-//                         None => Ok(None),
-//                         Some(cqe) => {
-//                             // although read is error, we also need to check if buffer is used or not
-//                             if cqe.is_err() {
-//                                 if let Some(buffer_id) = buffer_select(cqe.flags()) {
-//                                     driver.give_back_buffer_with_id(group_id, buffer_id);
-//                                 }
-//
-//                                 return Err(Error::from_raw_os_error(-cqe.result()));
-//                             }
-//
-//                             let buffer_id =
-//                                 buffer_select(cqe.flags()).expect("read success but no buffer id");
-//
-//                             Ok(Some(driver.take_buffer(
-//                                 self.want_buf_size,
-//                                 group_id,
-//                                 buffer_id,
-//                                 cqe.result() as _,
-//                             )))
-//                         }
-//                     }
-//                 })?;
-//
-//                 match buffer {
-//                     None => Poll::Pending,
-//                     Some(buffer) => {
-//                         // drop won't send useless cancel
-//                         self.user_data.take();
-//
-//                         // won't decrease on fly by mistake
-//                         self.group_id.take();
-//
-//                         Poll::Ready(Ok(buffer))
-//                     }
-//                 }
-//             }
-//
-//             (None, Some(_)) => unreachable!(),
-//
-//             (Some(group_id), None) => {
-//                 let sqe = RingRead::new(Fd(self.tcp_fd), ptr::null_mut(), self.want_buf_size as _)
-//                     .buf_group(group_id)
-//                     .build()
-//                     .flags(Flags::BUFFER_SELECT);
-//
-//                 let user_data = DRIVER.with(|driver| {
-//                     let mut driver = driver.borrow_mut();
-//                     let driver = driver.as_mut().expect("Driver is not running");
-//
-//                     driver.push_sqe_with_waker(sqe, cx.waker().clone())
-//                 })?;
-//
-//                 user_data.map(|user_data| self.user_data.replace(user_data));
-//
-//                 Poll::Pending
-//             }
-//
-//             (None, None) => {
-//                 let (group_id, user_data) = DRIVER.with(|driver| {
-//                     let mut driver = driver.borrow_mut();
-//                     let driver = driver.as_mut().expect("Driver is not running");
-//
-//                     let group_id = driver.select_group_buffer(self.want_buf_size, cx.waker())?;
-//
-//                     match group_id {
-//                         None => Ok::<_, Error>((None, None)),
-//                         Some(group_id) => {
-//                             let sqe = RingRead::new(
-//                                 Fd(self.tcp_fd),
-//                                 ptr::null_mut(),
-//                                 self.want_buf_size as _,
-//                             )
-//                             .buf_group(group_id)
-//                             .build()
-//                             .flags(Flags::BUFFER_SELECT);
-//
-//                             let user_data = driver.push_sqe_with_waker(sqe, cx.waker().clone())?;
-//
-//                             Ok((Some(group_id), user_data))
-//                         }
-//                     }
-//                 })?;
-//
-//                 if let Some(group_id) = group_id {
-//                     self.group_id.replace(group_id);
-//
-//                     user_data.map(|user_data| self.user_data.replace(user_data));
-//                 }
-//
-//                 Poll::Pending
-//             }
-//         }
-//     }
-// }
-//
-// impl Drop for BufRead {
-//     fn drop(&mut self) {
-//         DRIVER.with(|driver| {
-//             let mut driver = driver.borrow_mut();
-//             match driver.as_mut() {
-//                 None => {}
-//                 Some(driver) => match (self.group_id, self.user_data) {
-//                     (Some(group_id), Some(user_data)) => {
-//                         let _ = driver.cancel_read(user_data, group_id);
-//                     }
-//
-//                     (Some(group_id), None) => {
-//                         driver
-//                             .decrease_on_fly_for_not_use_group_buffer(self.want_buf_size, group_id);
-//                     }
-//
-//                     (None, Some(_)) => unreachable!(),
-//
-//                     (None, None) => {}
-//                 },
-//             }
-//         })
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read, Write};
@@ -442,7 +238,7 @@ mod tests {
     use futures_util::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::block_on;
+    use crate::{block_on, spawn};
 
     #[test]
     fn test_connect_v4() {
@@ -610,6 +406,56 @@ mod tests {
                 connect_stream.read_exact(&mut read_buf[..n]).await.unwrap();
 
                 assert_eq!(&write_buf[..n], &read_buf[..n]);
+            }
+        })
+    }
+
+    #[test]
+    fn test_multi_tcp_read() {
+        block_on(async move {
+            let mut listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let mut connect_streams = vec![];
+            let mut accept_streams = vec![];
+
+            // create many tcp so we can test if the GroupBuffer select can create a new GroupBuffer
+            // when no available GroupBuffer
+            for _ in 0..20 {
+                let handle = thread::spawn(move || {
+                    let result = listener.accept().map(|(stream, _)| stream);
+                    (listener, result)
+                });
+
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
+
+                let (l, accept_stream) = handle.join().unwrap();
+                let accept_stream = accept_stream.unwrap();
+
+                listener = l;
+
+                connect_streams.push(connect_stream);
+                accept_streams.push(accept_stream);
+            }
+
+            accept_streams.iter_mut().for_each(|accept_stream| {
+                accept_stream.write_all(b"test").unwrap();
+            });
+
+            let mut read_tasks = vec![];
+
+            for mut connect_stream in connect_streams {
+                let task = spawn(async move {
+                    connect_stream.read_exact(&mut [0; 4]).await.unwrap();
+                });
+
+                read_tasks.push(task);
+            }
+
+            for task in read_tasks {
+                task.await;
             }
         })
     }
