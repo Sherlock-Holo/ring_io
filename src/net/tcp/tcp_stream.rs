@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 use std::future::Future;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, IoSlice, IoSliceMut, Result};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
@@ -104,6 +104,14 @@ impl AsyncRead for TcpStream {
     ) -> Poll<Result<usize>> {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
+
+    fn poll_read_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<Result<usize>> {
+        Pin::new(&mut self.0).poll_read_vectored(cx, bufs)
+    }
 }
 
 impl AsyncBufRead for TcpStream {
@@ -123,6 +131,14 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<Result<usize>> {
         Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<Result<usize>> {
+        Pin::new(&mut self.0).poll_write_vectored(cx, bufs)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
