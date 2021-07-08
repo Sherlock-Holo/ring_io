@@ -15,6 +15,12 @@ pub struct ReadHalf<'a> {
     ring_fd: &'a mut RingFd,
 }
 
+impl<'a> ReadHalf<'a> {
+    pub(crate) fn new(ring_fd: &'a mut RingFd) -> Self {
+        Self { ring_fd }
+    }
+}
+
 impl<'a> AsyncRead for ReadHalf<'a> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -45,6 +51,12 @@ impl<'a> AsyncBufRead for ReadHalf<'a> {
 
 pub struct WriteHalf<'a> {
     ring_fd: &'a mut RingFd,
+}
+
+impl<'a> WriteHalf<'a> {
+    pub(crate) fn new(ring_fd: &'a mut RingFd) -> Self {
+        Self { ring_fd }
+    }
 }
 
 impl<'a> AsyncWrite for WriteHalf<'a> {
@@ -94,6 +106,15 @@ fn reunite<T: sealed::FromRingFd>(
 pub struct OwnedReadHalf<T> {
     ring_fd: Arc<UnsafeCell<RingFd>>,
     _phantom_data: PhantomData<T>,
+}
+
+impl<T> OwnedReadHalf<T> {
+    pub(crate) fn new(ring_fd: Arc<UnsafeCell<RingFd>>) -> Self {
+        Self {
+            ring_fd,
+            _phantom_data: Default::default(),
+        }
+    }
 }
 
 impl<T: sealed::FromRingFd> OwnedReadHalf<T> {
@@ -156,6 +177,15 @@ impl<T> AsyncBufRead for OwnedReadHalf<T> {
 pub struct OwnedWriteHalf<T> {
     ring_fd: Arc<UnsafeCell<RingFd>>,
     _phantom_data: PhantomData<T>,
+}
+
+impl<T> OwnedWriteHalf<T> {
+    pub(crate) fn new(ring_fd: Arc<UnsafeCell<RingFd>>) -> Self {
+        Self {
+            ring_fd,
+            _phantom_data: Default::default(),
+        }
+    }
 }
 
 impl<T: sealed::FromRingFd> OwnedWriteHalf<T> {

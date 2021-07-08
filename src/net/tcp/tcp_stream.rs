@@ -1,9 +1,11 @@
+use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::future::Future;
 use std::io::{Error, ErrorKind, IoSlice, IoSliceMut, Result};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
@@ -17,6 +19,7 @@ use nix::unistd;
 use crate::cqe_ext::EntryExt;
 use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
+use crate::io::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::nix_error::NixErrorExt;
 
 pub struct TcpStream(RingFd);
@@ -75,6 +78,25 @@ impl TcpStream {
             fd: None,
             user_data: None,
         }
+    }
+
+    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
+        let ring_fd: *mut RingFd = &mut self.0;
+
+        // Safety: the read one only do read job, the write on only do write job
+        let read_ring_fd = unsafe { &mut *ring_fd };
+        let write_ring_fd = unsafe { &mut *ring_fd };
+
+        (ReadHalf::new(read_ring_fd), WriteHalf::new(write_ring_fd))
+    }
+
+    pub fn into_split(self) -> (OwnedReadHalf<Self>, OwnedWriteHalf<Self>) {
+        let ring_fd = Arc::new(UnsafeCell::new(self.0));
+
+        (
+            OwnedReadHalf::new(ring_fd.clone()),
+            OwnedWriteHalf::new(ring_fd),
+        )
     }
 }
 
@@ -543,6 +565,36 @@ mod tests {
             let n = accept_stream.read(&mut [0; 1]).unwrap();
 
             assert_eq!(n, 0);
+        })
+    }
+
+    #[test]
+    fn split() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+
+            let (mut read, mut write) = connect_stream.split();
+
+            let mut buf = [0; 4];
+
+            write.write_all(b"test").await.unwrap();
+            accept_stream.read_exact(&mut buf).unwrap();
+
+            assert_eq!(&buf, b"test");
+
+            accept_stream.write_all(b"test").unwrap();
+            read.read_exact(&mut buf).await.unwrap();
+
+            assert_eq!(&buf, b"test");
         })
     }
 }
