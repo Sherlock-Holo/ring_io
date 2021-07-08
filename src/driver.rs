@@ -8,10 +8,14 @@ use std::time::Duration;
 use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
 use io_uring::squeue::Entry as SqEntry;
-use io_uring::IoUring;
+use io_uring::{IoUring, Probe};
 use nix::sys::socket::SockAddr;
 
 use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
+
+thread_local! {
+    pub static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
+}
 
 #[derive(Debug, Clone)]
 pub enum Callback {
@@ -53,6 +57,14 @@ impl Driver {
         }
 
         let ring = builder.build(4096)?;
+
+        if !check_support_provide_buffers(&ring)? {
+            panic!("The kernel doesn't support IORING_OP_PROVIDE_BUFFERS");
+        }
+
+        if !check_support_fast_poll(&ring) {
+            panic!("The kernel doesn't support io_uring fast_poll");
+        }
 
         Ok(Self {
             ring,
@@ -348,6 +360,14 @@ impl Driver {
     }
 }
 
-thread_local! {
-    pub static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);
+fn check_support_provide_buffers(ring: &IoUring) -> Result<bool> {
+    let mut probe = Probe::new();
+
+    ring.submitter().register_probe(&mut probe)?;
+
+    Ok(probe.is_supported(ProvideBuffers::CODE))
+}
+
+fn check_support_fast_poll(ring: &IoUring) -> bool {
+    ring.params().is_feature_fast_poll()
 }
