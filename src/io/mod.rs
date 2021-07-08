@@ -1,4 +1,6 @@
 use std::cell::UnsafeCell;
+use std::error::Error;
+use std::fmt::{self, Debug, Display, Formatter};
 use std::io::{IoSlice, IoSliceMut};
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -88,9 +90,9 @@ impl<'a> AsyncWrite for WriteHalf<'a> {
 fn reunite<T: sealed::FromRingFd>(
     read: OwnedReadHalf<T>,
     write: OwnedWriteHalf<T>,
-) -> Result<T, (OwnedReadHalf<T>, OwnedWriteHalf<T>)> {
+) -> Result<T, ReuniteError<T>> {
     if !Arc::ptr_eq(&read.ring_fd, &write.ring_fd) {
-        Err((read, write))
+        Err(ReuniteError(read, write))
     } else {
         drop(write);
 
@@ -118,13 +120,14 @@ impl<T> OwnedReadHalf<T> {
 }
 
 impl<T: sealed::FromRingFd> OwnedReadHalf<T> {
-    pub fn reunite(
-        self,
-        other: OwnedWriteHalf<T>,
-    ) -> Result<T, (OwnedReadHalf<T>, OwnedWriteHalf<T>)> {
+    pub fn reunite(self, other: OwnedWriteHalf<T>) -> Result<T, ReuniteError<T>> {
         reunite(self, other)
     }
 }
+
+unsafe impl<T> Send for OwnedReadHalf<T> {}
+
+unsafe impl<T> Sync for OwnedReadHalf<T> {}
 
 impl<T> AsyncRead for OwnedReadHalf<T> {
     fn poll_read(
@@ -189,13 +192,14 @@ impl<T> OwnedWriteHalf<T> {
 }
 
 impl<T: sealed::FromRingFd> OwnedWriteHalf<T> {
-    pub fn reunite(
-        self,
-        other: OwnedReadHalf<T>,
-    ) -> Result<T, (OwnedWriteHalf<T>, OwnedReadHalf<T>)> {
-        reunite(other, self).map_err(|(read, write)| (write, read))
+    pub fn reunite(self, other: OwnedReadHalf<T>) -> Result<T, ReuniteError<T>> {
+        reunite(other, self)
     }
 }
+
+unsafe impl<T> Send for OwnedWriteHalf<T> {}
+
+unsafe impl<T> Sync for OwnedWriteHalf<T> {}
 
 impl<T> AsyncWrite for OwnedWriteHalf<T> {
     fn poll_write(
@@ -257,3 +261,19 @@ mod sealed {
         }
     }
 }
+
+pub struct ReuniteError<T>(OwnedReadHalf<T>, OwnedWriteHalf<T>);
+
+impl<T> Debug for ReuniteError<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReuniteError").finish()
+    }
+}
+
+impl<T> Display for ReuniteError<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
+impl<T> Error for ReuniteError<T> {}

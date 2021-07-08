@@ -80,7 +80,7 @@ impl TcpStream {
         }
     }
 
-    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
+    pub fn split_half(&mut self) -> (ReadHalf, WriteHalf) {
         let ring_fd: *mut RingFd = &mut self.0;
 
         // Safety: the read one only do read job, the write on only do write job
@@ -582,7 +582,7 @@ mod tests {
 
             let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            let (mut read, mut write) = connect_stream.split();
+            let (mut read, mut write) = connect_stream.split_half();
 
             let mut buf = [0; 4];
 
@@ -595,6 +595,42 @@ mod tests {
             read.read_exact(&mut buf).await.unwrap();
 
             assert_eq!(&buf, b"test");
+        })
+    }
+
+    #[test]
+    fn into_split() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+
+            let (mut read, mut write) = connect_stream.into_split();
+
+            let mut buf = [0; 4];
+
+            write.write_all(b"test").await.unwrap();
+            accept_stream.read_exact(&mut buf).unwrap();
+
+            assert_eq!(&buf, b"test");
+
+            accept_stream.write_all(b"test").unwrap();
+            read.read_exact(&mut buf).await.unwrap();
+
+            assert_eq!(&buf, b"test");
+
+            // test for check if reunite works well or not
+            let mut connect_stream = read.reunite(write).unwrap();
+
+            connect_stream.write_all(b"test").await.unwrap();
+            accept_stream.read_exact(&mut buf).unwrap();
         })
     }
 }
