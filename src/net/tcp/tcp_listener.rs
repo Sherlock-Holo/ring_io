@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::ptr;
 use std::task::{Context, Poll};
 
+use futures_util::{FutureExt, Stream};
 use io_uring::opcode::Accept as RingAccept;
 use io_uring::types::Fd;
 use nix::sys::socket;
@@ -37,6 +38,13 @@ impl TcpListener {
         }
     }
 
+    pub fn incoming(&self) -> Incoming {
+        Incoming {
+            listener: self,
+            accept: None,
+        }
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr> {
         match socket::getsockname(self.std_listener.as_raw_fd()) {
             Err(err) => Err(err.into_io_error()),
@@ -60,6 +68,7 @@ impl IntoRawFd for TcpListener {
     }
 }
 
+#[derive(Debug)]
 pub struct Accept<'a> {
     listener: &'a TcpListener,
     user_data: Option<u64>,
@@ -127,10 +136,49 @@ impl<'a> Drop for Accept<'a> {
     }
 }
 
+#[derive(Debug)]
+pub struct Incoming<'a> {
+    listener: &'a TcpListener,
+    accept: Option<Accept<'a>>,
+}
+
+impl<'a> Stream for Incoming<'a> {
+    type Item = Result<TcpStream>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.accept {
+            None => {
+                let mut accept = self.listener.accept();
+
+                match accept.poll_unpin(cx) {
+                    Poll::Pending => {
+                        self.accept.replace(accept);
+
+                        Poll::Pending
+                    }
+
+                    Poll::Ready(result) => Poll::Ready(Some(result)),
+                }
+            }
+
+            Some(accept) => match accept.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => {
+                    self.accept.take();
+
+                    Poll::Ready(Some(result))
+                }
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::TcpStream as StdTcpStream;
     use std::thread;
+
+    use futures_util::StreamExt;
 
     use super::*;
     use crate::block_on;
@@ -177,6 +225,41 @@ mod tests {
             let handle = thread::spawn(move || StdTcpStream::connect(addr));
 
             let accept_stream = listener.accept().await.unwrap();
+            let connect_stream = handle.join().unwrap().unwrap();
+
+            assert_eq!(addr, connect_stream.peer_addr().unwrap());
+            assert_eq!(
+                accept_stream.peer_addr().unwrap(),
+                connect_stream.local_addr().unwrap()
+            );
+        })
+    }
+
+    #[test]
+    fn test_tcp_listener_incoming() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut incoming = listener.incoming();
+
+            dbg!(addr);
+
+            {
+                let handle = thread::spawn(move || StdTcpStream::connect(addr));
+
+                let accept_stream = incoming.next().await.unwrap().unwrap();
+                let connect_stream = handle.join().unwrap().unwrap();
+
+                assert_eq!(addr, connect_stream.peer_addr().unwrap());
+                assert_eq!(
+                    accept_stream.peer_addr().unwrap(),
+                    connect_stream.local_addr().unwrap()
+                );
+            }
+
+            let handle = thread::spawn(move || StdTcpStream::connect(addr));
+
+            let accept_stream = incoming.next().await.unwrap().unwrap();
             let connect_stream = handle.join().unwrap().unwrap();
 
             assert_eq!(addr, connect_stream.peer_addr().unwrap());
