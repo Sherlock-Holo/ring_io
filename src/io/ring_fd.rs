@@ -41,6 +41,19 @@ enum WriteState {
     Writing(Write),
 }
 
+impl Debug for WriteState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WriteState::NotInit => "NotInit",
+            WriteState::Idle { .. } => "Idle",
+            WriteState::Writing(_) => "Writing",
+        };
+
+        f.write_str(s)
+    }
+}
+
+#[derive(Debug)]
 pub struct RingFd {
     fd: RawFd,
     need_close_fd: bool,
@@ -289,7 +302,7 @@ impl AsyncWrite for RingFd {
     }
 }
 
-pub struct Write {
+struct Write {
     fd: RawFd,
     write_buffer: Vec<u8>,
     data_size: u32,

@@ -23,7 +23,8 @@ pub enum Callback {
 
     CancelRead { group_id: u16 },
 
-    // safe the addr in Box so no matter how move the addr, won't break the pointer
+    // save the addr in Box so no matter how to move the addr, won't break the pointer that in the
+    // io_uring
     CancelConnect { addr: Box<SockAddr>, fd: RawFd },
 
     Wakeup { waker: Waker },

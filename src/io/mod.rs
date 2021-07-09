@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
+pub use futures_util::io::{copy, copy_buf};
 
 use crate::io::ring_fd::RingFd;
 

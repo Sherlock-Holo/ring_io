@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::future::Future;
 use std::io::{Error, ErrorKind, IoSlice, IoSliceMut, Result};
+use std::net::Shutdown as HowShutdown;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
@@ -20,6 +21,7 @@ use crate::cqe_ext::EntryExt;
 use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 use crate::io::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use crate::net::shutdown::Shutdown;
 use crate::nix_error::NixErrorExt;
 
 pub struct TcpStream(RingFd);
@@ -97,6 +99,10 @@ impl TcpStream {
             OwnedReadHalf::new(ring_fd.clone()),
             OwnedWriteHalf::new(ring_fd),
         )
+    }
+
+    pub fn shutdown(&self, how: HowShutdown) -> Shutdown {
+        Shutdown::new(&self.0, how)
     }
 }
 
@@ -272,7 +278,9 @@ mod tests {
     use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::Duration;
 
+    use futures_util::lock::BiLock;
     use futures_util::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -631,6 +639,69 @@ mod tests {
 
             connect_stream.write_all(b"test").await.unwrap();
             accept_stream.read_exact(&mut buf).unwrap();
+        })
+    }
+
+    #[test]
+    fn test_shutdown_write() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+
+            connect_stream.shutdown(HowShutdown::Write).await.unwrap();
+
+            let n = accept_stream.read(&mut [0; 1]).unwrap();
+
+            assert_eq!(n, 0);
+        })
+    }
+
+    #[test]
+    fn test_shutdown_read() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (_accept_stream, _) = handle.join().unwrap().unwrap();
+
+            // actually I don't think there's people use BiLock to do this job, but here BiLock make
+            // the test easier
+            let (use_to_shutdown, use_to_read) = BiLock::new(connect_stream);
+
+            let task = spawn(async move {
+                use_to_read
+                    .lock()
+                    .await
+                    .as_pin_mut()
+                    .read(&mut [0; 1])
+                    .await
+                    .unwrap()
+            });
+
+            thread::sleep(Duration::from_secs(1));
+
+            use_to_shutdown
+                .lock()
+                .await
+                .shutdown(HowShutdown::Read)
+                .await
+                .unwrap();
+
+            assert_eq!(task.await, 0);
         })
     }
 }
