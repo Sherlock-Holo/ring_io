@@ -22,7 +22,6 @@ use crate::io::ring_fd::RingFd;
 use crate::io::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::net::peek::Peek;
 use crate::net::shutdown::Shutdown;
-use crate::nix_error::NixErrorExt;
 
 #[derive(Debug)]
 pub struct TcpStream(RingFd);
@@ -35,9 +34,7 @@ impl TcpStream {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         let fd = self.0.as_raw_fd();
 
-        if let SockAddr::Inet(inet_addr) =
-            socket::getsockname(fd).map_err(|err| err.into_io_error())?
-        {
+        if let SockAddr::Inet(inet_addr) = socket::getsockname(fd)? {
             Ok(inet_addr.to_std())
         } else {
             unreachable!()
@@ -47,9 +44,7 @@ impl TcpStream {
     pub fn peer_addr(&self) -> Result<SocketAddr> {
         let fd = self.0.as_raw_fd();
 
-        if let SockAddr::Inet(inet_addr) =
-            socket::getpeername(fd).map_err(|err| err.into_io_error())?
-        {
+        if let SockAddr::Inet(inet_addr) = socket::getpeername(fd)? {
             Ok(inet_addr.to_std())
         } else {
             unreachable!()
@@ -248,11 +243,10 @@ impl Future for Connect {
             SockType::Stream,
             SockFlag::SOCK_CLOEXEC,
             SockProtocol::Tcp,
-        )
-        .map_err(|err| err.into_io_error())?;
+        )?;
 
-        socket::setsockopt(fd, ReusePort, &true).map_err(|err| err.into_io_error())?;
-        socket::setsockopt(fd, ReuseAddr, &true).map_err(|err| err.into_io_error())?;
+        socket::setsockopt(fd, ReusePort, &true)?;
+        socket::setsockopt(fd, ReuseAddr, &true)?;
 
         this.fd.replace(fd);
 

@@ -16,7 +16,6 @@ use crate::cqe_ext::EntryExt;
 use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 use crate::net::tcp::tcp_stream::TcpStream;
-use crate::nix_error::NixErrorExt;
 
 #[derive(Debug)]
 pub struct TcpListener {
@@ -46,12 +45,11 @@ impl TcpListener {
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        match socket::getsockname(self.std_listener.as_raw_fd()) {
-            Err(err) => Err(err.into_io_error()),
-            Ok(addr) => match addr {
-                SockAddr::Inet(addr) => Ok(addr.to_std()),
-                _ => unreachable!(),
-            },
+        let addr = socket::getsockname(self.std_listener.as_raw_fd())?;
+        if let SockAddr::Inet(addr) = addr {
+            Ok(addr.to_std())
+        } else {
+            unreachable!()
         }
     }
 }

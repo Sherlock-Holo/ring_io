@@ -10,7 +10,7 @@ edition = "2018"
 futures-io = "0.3"
 futures-util = { version = "0.3", default-features = false }
 io-uring = { version = "0.5", features = ["unstable"] }
-nix = "0.21"
+nix = "0.22"
 libc = "0.2"
 slab = "0.4"
 async-task = "4.0"
