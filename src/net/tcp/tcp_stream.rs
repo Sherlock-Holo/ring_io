@@ -1,5 +1,4 @@
 use std::cell::UnsafeCell;
-use std::fmt::Debug;
 use std::future::Future;
 use std::io::{Error, ErrorKind, IoSlice, IoSliceMut, Result};
 use std::net::Shutdown as HowShutdown;
@@ -21,9 +20,11 @@ use crate::cqe_ext::EntryExt;
 use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 use crate::io::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
+use crate::net::peek::Peek;
 use crate::net::shutdown::Shutdown;
 use crate::nix_error::NixErrorExt;
 
+#[derive(Debug)]
 pub struct TcpStream(RingFd);
 
 impl TcpStream {
@@ -103,6 +104,29 @@ impl TcpStream {
 
     pub fn shutdown(&self, how: HowShutdown) -> Shutdown {
         Shutdown::new(&self.0, how)
+    }
+
+    pub async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        // not allow peek to big data, this limit may be removed in the future
+        let wan_buf_size = buf.len().min(65536).next_power_of_two();
+
+        let buffer = Peek::new(&mut self.0, wan_buf_size).await?;
+
+        let can_copy_size = buffer.len().min(buf.len());
+        (&mut buf[..can_copy_size]).copy_from_slice(&buffer[..can_copy_size]);
+
+        DRIVER.with(|driver| {
+            let mut driver = driver.borrow_mut();
+            let driver = driver.as_mut().expect("Driver is not running");
+
+            driver.give_back_buffer(buffer);
+        });
+
+        Ok(can_copy_size)
     }
 }
 
@@ -702,6 +726,42 @@ mod tests {
                 .unwrap();
 
             assert_eq!(task.await, 0);
+        })
+    }
+
+    #[test]
+    fn test_peek() {
+        block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            dbg!(addr);
+
+            let handle = thread::spawn(move || listener.accept());
+
+            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+
+            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+
+            accept_stream.write_all(b"test").unwrap();
+
+            let mut buf = [0; 4];
+
+            dbg!("written");
+
+            let n = connect_stream.peek(&mut buf).await.unwrap();
+            assert!(n <= 4);
+
+            assert_eq!(&buf[..n], &b"test"[..n]);
+
+            // check if the data loss or not
+            let n = connect_stream.peek(&mut buf).await.unwrap();
+            assert!(n <= 4);
+
+            assert_eq!(&buf[..n], &b"test"[..n]);
+
+            connect_stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"test");
         })
     }
 }

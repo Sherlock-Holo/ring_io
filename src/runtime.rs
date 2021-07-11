@@ -64,10 +64,10 @@ fn init_task_sender_and_receiver() -> bool {
         .is_some()
 }
 
-pub fn block_on<F, O>(fut: F) -> O
+pub fn block_on<F>(fut: F) -> F::Output
 where
-    F: Future<Output = O> + 'static + Send,
-    O: 'static + Send,
+    F: Future + 'static + Send,
+    F::Output: 'static + Send,
 {
     const MAX_RUN_TASK_COUNT: u8 = 64;
 
@@ -294,10 +294,10 @@ where
     }
 }
 
-pub fn spawn<F, O>(fut: F) -> Task<O>
+pub fn spawn<F>(fut: F) -> Task<F::Output>
 where
-    F: Future<Output = O> + 'static + Send,
-    O: 'static + Send,
+    F: Future + 'static + Send,
+    F::Output: 'static + Send,
 {
     let schedule = |runnable| {
         TASK_SENDER.with(|task_sender| {
@@ -317,10 +317,10 @@ where
     }
 }
 
-pub fn spawn_blocking<O, F>(f: F) -> Task<O>
+pub fn spawn_blocking<F, O>(f: F) -> Task<O>
 where
-    O: 'static + Send + Sync,
     F: FnOnce() -> O + 'static + Send + Sync,
+    O: 'static + Send + Sync,
 {
     let (tx, rx) = mpsc::channel();
 
