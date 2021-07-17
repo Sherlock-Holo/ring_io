@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::io::{Error, Result};
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::ptr;
 use std::task::{Context, Poll};
@@ -13,6 +13,7 @@ use io_uring::opcode::Read as RingRead;
 use io_uring::opcode::Write as RingWrite;
 use io_uring::squeue::Flags;
 use io_uring::types::Fd;
+use libc::off_t;
 use nix::unistd;
 
 use crate::buffer::Buffer;
@@ -59,6 +60,7 @@ pub struct RingFd {
     need_close_fd: bool,
     read_state: ReadState,
     write_state: WriteState,
+    file_mode: bool,
 }
 
 impl RingFd {
@@ -68,6 +70,17 @@ impl RingFd {
             need_close_fd: true,
             read_state: ReadState::Idle(0),
             write_state: WriteState::NotInit,
+            file_mode: false,
+        }
+    }
+
+    pub(crate) unsafe fn new_file(fd: RawFd) -> Self {
+        Self {
+            fd,
+            need_close_fd: true,
+            read_state: ReadState::Idle(0),
+            write_state: WriteState::NotInit,
+            file_mode: true,
         }
     }
 }
@@ -83,12 +96,6 @@ impl IntoRawFd for RingFd {
         self.need_close_fd = false;
 
         self.fd
-    }
-}
-
-impl FromRawFd for RingFd {
-    unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        Self::new(fd)
     }
 }
 
@@ -148,6 +155,7 @@ impl AsyncBufRead for RingFd {
                     want_buf_size: want_size,
                     group_id: None,
                     user_data: None,
+                    offset: self.file_mode.then(|| -1).unwrap_or(0),
                 }
             }
 
@@ -372,6 +380,7 @@ struct BufRead {
     want_buf_size: usize,
     group_id: Option<u16>,
     user_data: Option<u64>,
+    offset: off_t,
 }
 
 impl Future for BufRead {
@@ -427,6 +436,7 @@ impl Future for BufRead {
 
             (Some(group_id), None) => {
                 let sqe = RingRead::new(Fd(self.fd), ptr::null_mut(), self.want_buf_size as _)
+                    .offset(self.offset)
                     .buf_group(group_id)
                     .build()
                     .flags(Flags::BUFFER_SELECT);
@@ -458,6 +468,7 @@ impl Future for BufRead {
                                 ptr::null_mut(),
                                 self.want_buf_size as _,
                             )
+                            .offset(self.offset)
                             .buf_group(group_id)
                             .build()
                             .flags(Flags::BUFFER_SELECT);

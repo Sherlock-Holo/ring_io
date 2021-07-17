@@ -2,13 +2,13 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io::Error;
 use std::pin::Pin;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
 
 use async_task::{Runnable, Task as AsyncTask};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use futures_util::task::AtomicWaker;
 use futures_util::FutureExt;
 use io_uring::cqueue::buffer_select;
@@ -42,7 +42,7 @@ fn init_driver(sq_poll: Option<Duration>) -> bool {
 
 /// return false if task sender and receiver is init before
 fn init_task_sender_and_receiver() -> bool {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = crossbeam_channel::unbounded();
 
     TASK_SENDER
         .with(|task_sender| {
@@ -74,7 +74,7 @@ where
     init_driver(None);
     init_task_sender_and_receiver();
 
-    let (sender, receiver) = mpsc::sync_channel(1);
+    let (sender, receiver) = crossbeam_channel::bounded(1);
 
     spawn(async move {
         let result = fut.await;
@@ -174,6 +174,12 @@ where
                             Callback::CancelConnect { addr: _, fd } => {
                                 let _ = unistd::close(fd);
                             }
+
+                            // no need to do anything
+                            Callback::CancelOpenAt { .. }
+                            | Callback::CancelStatx { .. }
+                            | Callback::CancelRenameAt { .. }
+                            | Callback::CancelUnlinkAt { .. } => {}
                         }
 
                         continue;
@@ -222,6 +228,12 @@ where
                         Callback::CancelConnect { addr: _, fd } => {
                             let _ = unistd::close(fd);
                         }
+
+                        // no need to do
+                        Callback::CancelOpenAt { .. }
+                        | Callback::CancelStatx { .. }
+                        | Callback::CancelRenameAt { .. }
+                        | Callback::CancelUnlinkAt { .. } => {}
                     }
                 }
             }
@@ -270,7 +282,7 @@ impl<O> Task<O> {
 
 impl<O> Future for Task<O>
 where
-    O: 'static,
+    O: 'static + Unpin,
 {
     type Output = O;
 
@@ -299,13 +311,13 @@ where
     F: Future + 'static + Send,
     F::Output: 'static + Send,
 {
-    let schedule = |runnable| {
-        TASK_SENDER.with(|task_sender| {
-            let mut task_sender = task_sender.borrow_mut();
-            let task_sender = task_sender.as_mut().expect("task sender not init");
+    let task_sender = TASK_SENDER.with(|task_sender| {
+        let mut task_sender = task_sender.borrow_mut();
+        task_sender.as_mut().expect("task sender not init").clone()
+    });
 
-            task_sender.send(runnable).unwrap();
-        })
+    let schedule = move |runnable| {
+        task_sender.send(runnable).unwrap();
     };
 
     let (runnable, task) = async_task::spawn(fut, schedule);
@@ -322,7 +334,7 @@ where
     F: FnOnce() -> O + 'static + Send + Sync,
     O: 'static + Send + Sync,
 {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = crossbeam_channel::bounded(1);
 
     // allow the blocking thread send result back to the main thread
     let main_thread_task_sender = TASK_SENDER.with(|task_sender| {
@@ -429,5 +441,12 @@ mod tests {
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
         assert_eq!(n3, 3);
+    }
+
+    #[test]
+    fn run_with_futures_timer() {
+        block_on(async {
+            futures_timer::Delay::new(Duration::from_secs(1)).await;
+        })
     }
 }

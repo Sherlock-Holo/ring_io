@@ -139,7 +139,7 @@ impl IntoRawFd for TcpStream {
 
 impl FromRawFd for TcpStream {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        Self(RingFd::from_raw_fd(fd))
+        Self(RingFd::new(fd))
     }
 }
 
@@ -229,7 +229,7 @@ impl Future for Connect {
                     connect_cqe.ok()?;
 
                     // Safety: fd is valid
-                    Poll::Ready(Ok(unsafe { TcpStream::new(RingFd::from_raw_fd(fd)) }))
+                    Poll::Ready(Ok(unsafe { TcpStream::new(RingFd::new(fd)) }))
                 }
             };
         }

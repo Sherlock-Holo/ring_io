@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::ffi::CString;
 use std::io::Result;
+use std::mem::MaybeUninit;
 use std::os::unix::io::RawFd;
 use std::task::Waker;
 use std::time::Duration;
@@ -19,15 +21,42 @@ thread_local! {
 
 #[derive(Debug, Clone)]
 pub enum Callback {
-    ProvideBuffer { group_id: u16 },
+    ProvideBuffer {
+        group_id: u16,
+    },
 
-    CancelRead { group_id: u16 },
+    CancelRead {
+        group_id: u16,
+    },
 
     // save the addr in Box so no matter how to move the addr, won't break the pointer that in the
     // io_uring
-    CancelConnect { addr: Box<SockAddr>, fd: RawFd },
+    CancelConnect {
+        addr: Box<SockAddr>,
+        fd: RawFd,
+    },
 
-    Wakeup { waker: Waker },
+    CancelOpenAt {
+        path: CString,
+    },
+
+    CancelStatx {
+        path: CString,
+        statx: Box<MaybeUninit<libc::statx>>,
+    },
+
+    CancelRenameAt {
+        old_path: CString,
+        new_path: CString,
+    },
+
+    CancelUnlinkAt {
+        path: CString,
+    },
+
+    Wakeup {
+        waker: Waker,
+    },
 }
 
 pub struct Driver {
@@ -161,8 +190,8 @@ impl Driver {
             low_level_buf_ptr_mut,
             buffer_size as _,
             1,
-            buffer_id,
             group_id,
+            buffer_id,
         )
         .build()
         .user_data(user_data);
@@ -189,7 +218,7 @@ impl Driver {
         let user_data = self.next_user_data;
         self.next_user_data += 1;
 
-        let provide_buffer_sqe = ProvideBuffers::new(ptr_mut, len as _, 1, buffer_id, group_id)
+        let provide_buffer_sqe = ProvideBuffers::new(ptr_mut, len as _, 1, group_id, buffer_id)
             .build()
             .user_data(user_data);
 
@@ -293,8 +322,8 @@ impl Driver {
         Ok(())
     }
 
-    /// cancel the read event, when the event canceled or ready after cancel, give back the buffer
-    /// if buffer is used
+    /// cancel the connect event, when the event canceled or ready after cancel, let the drop
+    /// release data
     pub fn cancel_connect(&mut self, user_data: u64, addr: Box<SockAddr>, fd: RawFd) -> Result<()> {
         let background_user_data = self.next_user_data;
         self.next_user_data += 1;
@@ -316,6 +345,124 @@ impl Driver {
         // change the callback to CancelConnect
         self.callbacks
             .insert(user_data, Callback::CancelConnect { addr, fd });
+
+        Ok(())
+    }
+
+    /// cancel the open_at event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub fn cancel_open_at(&mut self, user_data: u64, path: CString) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelOpenAt
+        self.callbacks
+            .insert(user_data, Callback::CancelOpenAt { path });
+
+        Ok(())
+    }
+
+    /// cancel the statx event, when the event canceled or ready after cancel, let the drop release
+    /// data
+    pub fn cancel_statx(
+        &mut self,
+        user_data: u64,
+        path: CString,
+        statx: Box<MaybeUninit<libc::statx>>,
+    ) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelStatx
+        self.callbacks
+            .insert(user_data, Callback::CancelStatx { path, statx });
+
+        Ok(())
+    }
+
+    /// cancel the rename_at event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub fn cancel_rename_at(
+        &mut self,
+        user_data: u64,
+        old_path: CString,
+        new_path: CString,
+    ) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelStatx
+        self.callbacks
+            .insert(user_data, Callback::CancelRenameAt { old_path, new_path });
+
+        Ok(())
+    }
+
+    /// cancel the unlink_at event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub fn cancel_unlink_at(&mut self, user_data: u64, path: CString) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelStatx
+        self.callbacks
+            .insert(user_data, Callback::CancelUnlinkAt { path });
 
         Ok(())
     }
