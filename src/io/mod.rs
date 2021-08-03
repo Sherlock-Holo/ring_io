@@ -9,10 +9,12 @@ use std::task::{Context, Poll};
 
 use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
 pub use futures_util::io::{copy, copy_buf};
+pub use splice::Splice;
 
 use crate::io::ring_fd::RingFd;
 
 pub mod ring_fd;
+mod splice;
 
 pub struct ReadHalf<'a> {
     ring_fd: &'a mut RingFd,

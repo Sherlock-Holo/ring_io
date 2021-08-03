@@ -259,6 +259,50 @@ impl Driver {
         }
     }
 
+    /*pub fn push_sqes_with_waker(
+        &mut self,
+        mut sqes: Vec<SqEntry>,
+        waker: Waker,
+    ) -> Result<Option<Vec<u64>>> {
+        let user_data = self.next_user_data;
+        self.next_user_data += sqes.len() as u64;
+
+        let mut user_data_list = Vec::with_capacity(sqes.len());
+        for i in 0..sqes.len() {
+            user_data_list.push(user_data + i as u64);
+        }
+
+        for (index, &user_data) in user_data_list.iter().enumerate() {
+            sqes[index] = sqes[index].clone().user_data(user_data);
+        }
+
+        unsafe {
+            if self.ring.submission().push_multiple(&sqes).is_err() {
+                self.ring.submit()?;
+
+                // sq is still full, push in next times
+                if self.ring.submission().push_multiple(&sqes).is_err() {
+                    self.wait_for_push_wakers.push_back(waker);
+
+                    return Ok(None);
+                }
+            }
+
+            for &user_data in user_data_list.iter() {
+                self.callbacks.insert(
+                    user_data,
+                    Callback::Wakeup {
+                        waker: waker.clone(),
+                    },
+                );
+            }
+
+            self.ring.submit()?;
+
+            Ok(Some(user_data_list))
+        }
+    }*/
+
     pub fn push_sqe(&mut self, sqe: &SqEntry) -> Result<bool> {
         unsafe {
             if self.ring.submission().push(sqe).is_err() {

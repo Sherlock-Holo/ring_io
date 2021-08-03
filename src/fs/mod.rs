@@ -3,11 +3,13 @@ use std::io::{Error, ErrorKind, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+pub use copy::copy;
 pub use file::{read, write, File, OpenOptions, Sync};
 pub use metadata::{metadata, symlink_metadata, FileType, Metadata, Permissions};
 pub use remove::{remove_dir, remove_file};
 pub use rename::rename;
 
+mod copy;
 mod file;
 mod metadata;
 mod remove;
