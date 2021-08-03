@@ -317,6 +317,7 @@ pub struct Buffer {
     buf_ptr: *mut u8,
     buf_size: usize,
     available_size: usize,
+    used: usize,
 }
 
 impl Buffer {
@@ -336,6 +337,7 @@ impl Buffer {
             buf_ptr,
             buf_size,
             available_size,
+            used: 0,
         }
     }
 
@@ -356,9 +358,9 @@ impl Buffer {
     }
 
     pub fn consume(&mut self, amt: usize) {
-        debug_assert!(self.available_size >= amt);
+        self.used += amt;
 
-        self.available_size -= amt;
+        debug_assert!(self.used <= self.available_size);
     }
 }
 
@@ -371,12 +373,15 @@ impl Deref for Buffer {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*ptr::slice_from_raw_parts(self.buf_ptr, self.available_size) }
+        let slice = unsafe { &*ptr::slice_from_raw_parts(self.buf_ptr, self.available_size) };
+        &slice[self.used..]
     }
 }
 
 impl DerefMut for Buffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *ptr::slice_from_raw_parts_mut(self.buf_ptr, self.available_size) }
+        let slice =
+            unsafe { &mut *ptr::slice_from_raw_parts_mut(self.buf_ptr, self.available_size) };
+        &mut slice[self.used..]
     }
 }

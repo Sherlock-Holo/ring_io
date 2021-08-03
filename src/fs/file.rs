@@ -711,4 +711,27 @@ mod tests {
             assert_eq!(&buf[..n], b"test");
         })
     }
+
+    #[test]
+    fn test_read_with_small_buf() {
+        block_on(async {
+            let mut file = File::open("testdata/book.txt").await.unwrap();
+
+            let mut data = vec![];
+            let mut buf = vec![0; 2];
+
+            loop {
+                let n = file.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+
+                data.extend_from_slice(&buf[..n]);
+            }
+
+            let book = std::fs::read("testdata/book.txt").unwrap();
+
+            assert_eq!(&book, &data);
+        })
+    }
 }
