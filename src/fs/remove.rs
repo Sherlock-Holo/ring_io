@@ -34,6 +34,19 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     .await
 }
 
+// wait for io_uring readdir and opendir support
+/*pub async fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path = path.as_ref();
+
+    let filetype = symlink_metadata(path).await?.file_type();
+
+    if filetype.is_symlink() {
+        remove_file(path).await
+    } else {
+        todo!()
+    }
+}*/
+
 struct Remove {
     path: Option<CString>,
     user_data: Option<u64>,

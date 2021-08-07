@@ -7,7 +7,7 @@ use std::ptr;
 use std::task::{Context, Poll};
 use std::{fmt, mem};
 
-use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
+use futures_util::{AsyncBufRead, AsyncRead, AsyncWrite};
 use io_uring::cqueue::buffer_select;
 use io_uring::opcode::Read as RingRead;
 use io_uring::opcode::Write as RingWrite;

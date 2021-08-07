@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures_io::{AsyncBufRead, AsyncRead, AsyncWrite};
+use futures_util::{AsyncBufRead, AsyncRead, AsyncWrite};
 use io_uring::opcode::Connect as RingConnect;
 use io_uring::types::Fd;
 use nix::sys::socket;

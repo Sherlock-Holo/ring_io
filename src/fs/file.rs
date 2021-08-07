@@ -9,8 +9,9 @@ use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures_io::{AsyncBufRead, AsyncRead, AsyncSeek, AsyncWrite};
-use futures_util::{AsyncReadExt, AsyncWriteExt, FutureExt};
+use futures_util::{
+    AsyncBufRead, AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, FutureExt,
+};
 use io_uring::opcode::{Fsync, OpenAt};
 use io_uring::types::{Fd, FsyncFlags};
 use libc::mode_t;
