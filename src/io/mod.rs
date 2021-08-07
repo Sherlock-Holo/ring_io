@@ -10,11 +10,14 @@ use std::task::{Context, Poll};
 pub use futures_util::io::{copy, copy_buf};
 use futures_util::{AsyncBufRead, AsyncRead, AsyncWrite};
 pub use splice::Splice;
+pub use stdio::stdin::{stdin, Stdin};
+pub use stdio::stdout_and_stderr::{stderr, stdout, Stderr, Stdout};
 
 use crate::io::ring_fd::RingFd;
 
 pub mod ring_fd;
 mod splice;
+mod stdio;
 
 pub struct ReadHalf<'a> {
     ring_fd: &'a mut RingFd,
