@@ -10,8 +10,8 @@ use std::task::{Context, Poll};
 pub use futures_util::io::{copy, copy_buf};
 use futures_util::{AsyncBufRead, AsyncRead, AsyncWrite};
 pub use splice::Splice;
-pub use stdio::stdin::{stdin, Stdin};
-pub use stdio::stdout_and_stderr::{stderr, stdout, Stderr, Stdout};
+pub use stdio::stdin::{stdin, Stdin, StdinGuard};
+pub use stdio::stdout_and_stderr::{stderr, stdout, Stderr, StderrGuard, Stdout, StdoutGuard};
 
 use crate::io::ring_fd::RingFd;
 
