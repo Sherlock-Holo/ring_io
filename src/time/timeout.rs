@@ -53,45 +53,54 @@ impl<F: Future> Future for Timeout<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_timeout_expired() {
-        block_on(async {
-            let err = timeout(
-                Duration::from_secs(1),
-                futures_util::future::pending::<()>(),
-            )
-            .await
-            .unwrap_err();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let err = timeout(
+                    Duration::from_secs(1),
+                    futures_util::future::pending::<()>(),
+                )
+                .await
+                .unwrap_err();
 
-            assert_eq!(err.kind(), ErrorKind::TimedOut)
-        })
+                assert_eq!(err.kind(), ErrorKind::TimedOut)
+            })
     }
 
     #[test]
     fn test_timeout_not_expired() {
-        block_on(async {
-            assert_eq!(
-                timeout(Duration::from_secs(1), async { 1 }).await.unwrap(),
-                1
-            )
-        })
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                assert_eq!(
+                    timeout(Duration::from_secs(1), async { 1 }).await.unwrap(),
+                    1
+                )
+            })
     }
 
     #[test]
     fn test_timeout_not_expired_with_long_future() {
-        block_on(async {
-            assert_eq!(
-                timeout(Duration::from_secs(2), async {
-                    sleep(Duration::from_secs(1)).await;
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                assert_eq!(
+                    timeout(Duration::from_secs(2), async {
+                        sleep(Duration::from_secs(1)).await;
 
+                        1
+                    })
+                    .await
+                    .unwrap(),
                     1
-                })
-                .await
-                .unwrap(),
-                1
-            )
-        })
+                )
+            })
     }
 }

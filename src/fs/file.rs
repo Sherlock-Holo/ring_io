@@ -488,257 +488,296 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_open_read_only() {
-        block_on(async {
-            File::open("testdata/book.txt").await.unwrap();
-        })
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                File::open("testdata/book.txt").await.unwrap();
+            })
     }
 
     #[test]
     fn test_write_only() {
-        block_on(async {
-            OpenOptions::new()
-                .write(true)
-                .open("testdata/book.txt")
-                .await
-                .unwrap();
-        })
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                OpenOptions::new()
+                    .write(true)
+                    .open("testdata/book.txt")
+                    .await
+                    .unwrap();
+            })
     }
 
     #[test]
     fn test_read_write() {
-        block_on(async {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("testdata/book.txt")
-                .await
-                .unwrap();
-        })
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("testdata/book.txt")
+                    .await
+                    .unwrap();
+            })
     }
 
     #[test]
     fn test_read() {
-        block_on(async {
-            let mut file = File::open("testdata/book.txt").await.unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let mut file = File::open("testdata/book.txt").await.unwrap();
 
-            let mut buf = vec![];
+                let mut buf = vec![];
 
-            let n = file.read_to_end(&mut buf).await.unwrap();
+                let n = file.read_to_end(&mut buf).await.unwrap();
 
-            dbg!(n);
+                dbg!(n);
 
-            let book = std::fs::read("testdata/book.txt").unwrap();
+                let book = std::fs::read("testdata/book.txt").unwrap();
 
-            assert_eq!(&book, &buf[..n]);
-        })
+                assert_eq!(&book, &buf[..n]);
+            })
     }
 
     #[test]
     fn test_write() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .write(true)
-                .open(file.path())
-                .await
-                .unwrap();
-            open_file.write_all(b"test").await.unwrap();
+                let mut open_file = OpenOptions::new()
+                    .write(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
+                open_file.write_all(b"test").await.unwrap();
 
-            let mut buf = vec![];
-            let n = file.read_to_end(&mut buf).unwrap();
+                let mut buf = vec![];
+                let n = file.read_to_end(&mut buf).unwrap();
 
-            assert_eq!(&buf[..n], b"test");
-        })
+                assert_eq!(&buf[..n], b"test");
+            })
     }
 
     #[test]
     fn test_create() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let mut tmp_file_path = tmp_dir.path().to_path_buf();
-            tmp_file_path.push("test-file");
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let mut tmp_file_path = tmp_dir.path().to_path_buf();
+                tmp_file_path.push("test-file");
 
-            assert_eq!(
-                std::fs::metadata(&tmp_file_path).unwrap_err().kind(),
-                ErrorKind::NotFound
-            );
+                assert_eq!(
+                    std::fs::metadata(&tmp_file_path).unwrap_err().kind(),
+                    ErrorKind::NotFound
+                );
 
-            let _file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_file_path)
-                .await
-                .unwrap();
+                let _file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&tmp_file_path)
+                    .await
+                    .unwrap();
 
-            assert!(std::fs::metadata(tmp_file_path).unwrap().is_file());
-        })
+                assert!(std::fs::metadata(tmp_file_path).unwrap().is_file());
+            })
     }
 
     #[test]
     fn test_seek() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .write(true)
-                .read(true)
-                .open(file.path())
-                .await
-                .unwrap();
-            open_file.write_all(b"test").await.unwrap();
+                let mut open_file = OpenOptions::new()
+                    .write(true)
+                    .read(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
+                open_file.write_all(b"test").await.unwrap();
 
-            let n = open_file.seek(SeekFrom::Start(0)).await.unwrap();
-            assert_eq!(n, 0);
+                let n = open_file.seek(SeekFrom::Start(0)).await.unwrap();
+                assert_eq!(n, 0);
 
-            let mut buf = vec![];
-            let n = open_file.read_to_end(&mut buf).await.unwrap();
+                let mut buf = vec![];
+                let n = open_file.read_to_end(&mut buf).await.unwrap();
 
-            assert_eq!(&buf[..n], b"test");
-        })
+                assert_eq!(&buf[..n], b"test");
+            })
     }
 
     #[test]
     fn test_open_truncate() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            file.write_all(b"test").unwrap();
+                file.write_all(b"test").unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .truncate(true)
-                .write(true)
-                .read(true)
-                .open(file.path())
-                .await
-                .unwrap();
+                let mut open_file = OpenOptions::new()
+                    .truncate(true)
+                    .write(true)
+                    .read(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
 
-            let n = open_file.read(&mut [0; 1]).await.unwrap();
-            assert_eq!(n, 0);
-        })
+                let n = open_file.read(&mut [0; 1]).await.unwrap();
+                assert_eq!(n, 0);
+            })
     }
 
     #[test]
     fn test_open_append() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            file.write_all(b"test").unwrap();
+                file.write_all(b"test").unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .append(true)
-                .write(true)
-                .open(file.path())
-                .await
-                .unwrap();
+                let mut open_file = OpenOptions::new()
+                    .append(true)
+                    .write(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
 
-            open_file.write_all(b"test").await.unwrap();
+                open_file.write_all(b"test").await.unwrap();
 
-            file.seek(SeekFrom::Start(0)).unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
 
-            let mut buf = vec![];
+                let mut buf = vec![];
 
-            let n = file.read_to_end(&mut buf).unwrap();
+                let n = file.read_to_end(&mut buf).unwrap();
 
-            assert_eq!(&buf[..n], b"testtest");
-        })
+                assert_eq!(&buf[..n], b"testtest");
+            })
     }
 
     #[test]
     fn test_sync() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .write(true)
-                .open(file.path())
-                .await
-                .unwrap();
-            open_file.write_all(b"test").await.unwrap();
+                let mut open_file = OpenOptions::new()
+                    .write(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
+                open_file.write_all(b"test").await.unwrap();
 
-            open_file.sync_data().await.unwrap();
-            open_file.sync_all().await.unwrap();
+                open_file.sync_data().await.unwrap();
+                open_file.sync_all().await.unwrap();
 
-            let mut buf = vec![];
-            let n = file.read_to_end(&mut buf).unwrap();
+                let mut buf = vec![];
+                let n = file.read_to_end(&mut buf).unwrap();
 
-            assert_eq!(&buf[..n], b"test");
-        })
+                assert_eq!(&buf[..n], b"test");
+            })
     }
 
     #[test]
     fn test_read_func() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            let mut open_file = OpenOptions::new()
-                .write(true)
-                .open(file.path())
-                .await
-                .unwrap();
-            open_file.write_all(b"test").await.unwrap();
+                let mut open_file = OpenOptions::new()
+                    .write(true)
+                    .open(file.path())
+                    .await
+                    .unwrap();
+                open_file.write_all(b"test").await.unwrap();
 
-            let buf = read(file.path()).await.unwrap();
+                let buf = read(file.path()).await.unwrap();
 
-            assert_eq!(&buf, b"test");
-        })
+                assert_eq!(&buf, b"test");
+            })
     }
 
     #[test]
     fn test_write_func() {
-        block_on(async {
-            let tmp_dir = env::temp_dir();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = env::temp_dir();
 
-            let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir).unwrap();
 
-            dbg!(file.path());
+                dbg!(file.path());
 
-            write(file.path(), b"test").await.unwrap();
+                write(file.path(), b"test").await.unwrap();
 
-            let mut buf = vec![];
+                let mut buf = vec![];
 
-            let n = file.read_to_end(&mut buf).unwrap();
+                let n = file.read_to_end(&mut buf).unwrap();
 
-            assert_eq!(&buf[..n], b"test");
-        })
+                assert_eq!(&buf[..n], b"test");
+            })
     }
 
     #[test]
     fn test_read_with_small_buf() {
-        block_on(async {
-            let mut file = File::open("testdata/book.txt").await.unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let mut file = File::open("testdata/book.txt").await.unwrap();
 
-            let mut data = vec![];
-            let mut buf = vec![0; 2];
+                let mut data = vec![];
+                let mut buf = vec![0; 2];
 
-            loop {
-                let n = file.read(&mut buf).await.unwrap();
-                if n == 0 {
-                    break;
+                loop {
+                    let n = file.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+
+                    data.extend_from_slice(&buf[..n]);
                 }
 
-                data.extend_from_slice(&buf[..n]);
-            }
+                let book = std::fs::read("testdata/book.txt").unwrap();
 
-            let book = std::fs::read("testdata/book.txt").unwrap();
-
-            assert_eq!(&book, &data);
-        })
+                assert_eq!(&book, &data);
+            })
     }
 }

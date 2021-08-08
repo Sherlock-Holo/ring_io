@@ -302,460 +302,506 @@ mod tests {
     use futures_util::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::{block_on, spawn};
+    use crate::runtime::Runtime;
+    use crate::spawn;
 
     #[test]
     fn test_connect_v4() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            assert_eq!(connect_stream.peer_addr().unwrap(), addr);
+                assert_eq!(connect_stream.peer_addr().unwrap(), addr);
 
-            let (accept_stream, accept_peer_addr) = handle.join().unwrap().unwrap();
+                let (accept_stream, accept_peer_addr) = handle.join().unwrap().unwrap();
 
-            assert_eq!(connect_stream.local_addr().unwrap(), accept_peer_addr);
+                assert_eq!(connect_stream.local_addr().unwrap(), accept_peer_addr);
 
-            assert_eq!(
-                connect_stream.peer_addr().unwrap(),
-                accept_stream.local_addr().unwrap()
-            );
-        })
+                assert_eq!(
+                    connect_stream.peer_addr().unwrap(),
+                    accept_stream.local_addr().unwrap()
+                );
+            })
     }
 
     #[test]
     fn test_connect_v6() {
-        block_on(async {
-            let listener = TcpListener::bind("[::1]:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("[::1]:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            assert_eq!(connect_stream.peer_addr().unwrap(), addr);
+                assert_eq!(connect_stream.peer_addr().unwrap(), addr);
 
-            let (accept_stream, accept_peer_addr) = handle.join().unwrap().unwrap();
+                let (accept_stream, accept_peer_addr) = handle.join().unwrap().unwrap();
 
-            assert_eq!(connect_stream.local_addr().unwrap(), accept_peer_addr);
+                assert_eq!(connect_stream.local_addr().unwrap(), accept_peer_addr);
 
-            assert_eq!(
-                connect_stream.peer_addr().unwrap(),
-                accept_stream.local_addr().unwrap()
-            );
-        })
+                assert_eq!(
+                    connect_stream.peer_addr().unwrap(),
+                    accept_stream.local_addr().unwrap()
+                );
+            })
     }
 
     #[test]
     fn test_write() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            connect_stream.write(b"test").await.unwrap();
+                connect_stream.write(b"test").await.unwrap();
 
-            let mut buf = vec![0; 4];
+                let mut buf = vec![0; 4];
 
-            accept_stream.read_exact(&mut buf).unwrap();
+                accept_stream.read_exact(&mut buf).unwrap();
 
-            assert_eq!(&buf, b"test");
-        })
+                assert_eq!(&buf, b"test");
+            })
     }
 
     #[test]
     fn test_read() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            accept_stream.write_all(b"test").unwrap();
+                accept_stream.write_all(b"test").unwrap();
 
-            let mut buf = vec![0; 4];
+                let mut buf = vec![0; 4];
 
-            dbg!("written");
+                dbg!("written");
 
-            connect_stream.read_exact(&mut buf).await.unwrap();
+                connect_stream.read_exact(&mut buf).await.unwrap();
 
-            assert_eq!(&buf, b"test");
-        })
+                assert_eq!(&buf, b"test");
+            })
     }
 
     #[test]
     fn test_multi_write() {
         let mut data = Cursor::new(std::fs::read("testdata/book.txt").unwrap());
 
-        block_on(async move {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            let mut read_buf = vec![0; 4096];
-            let mut write_buf = vec![0; 4096];
+                let mut read_buf = vec![0; 4096];
+                let mut write_buf = vec![0; 4096];
 
-            loop {
-                let n = data.read(&mut write_buf).unwrap();
-                if n == 0 {
-                    break;
+                loop {
+                    let n = data.read(&mut write_buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+
+                    connect_stream.write_all(&write_buf[..n]).await.unwrap();
+
+                    accept_stream.read_exact(&mut read_buf[..n]).unwrap();
+
+                    assert_eq!(&write_buf[..n], &read_buf[..n]);
                 }
-
-                connect_stream.write_all(&write_buf[..n]).await.unwrap();
-
-                accept_stream.read_exact(&mut read_buf[..n]).unwrap();
-
-                assert_eq!(&write_buf[..n], &read_buf[..n]);
-            }
-        })
+            })
     }
 
     #[test]
     fn test_multi_read() {
         let mut data = Cursor::new(std::fs::read("testdata/book.txt").unwrap());
 
-        block_on(async move {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            let mut read_buf = vec![0; 4096];
-            let mut write_buf = vec![0; 4096];
+                let mut read_buf = vec![0; 4096];
+                let mut write_buf = vec![0; 4096];
 
-            loop {
-                let n = data.read(&mut write_buf).unwrap();
-                if n == 0 {
-                    break;
+                loop {
+                    let n = data.read(&mut write_buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+
+                    dbg!(n);
+
+                    accept_stream.write_all(&write_buf[..n]).unwrap();
+
+                    connect_stream.read_exact(&mut read_buf[..n]).await.unwrap();
+
+                    assert_eq!(&write_buf[..n], &read_buf[..n]);
                 }
-
-                dbg!(n);
-
-                accept_stream.write_all(&write_buf[..n]).unwrap();
-
-                connect_stream.read_exact(&mut read_buf[..n]).await.unwrap();
-
-                assert_eq!(&write_buf[..n], &read_buf[..n]);
-            }
-        })
+            })
     }
 
     #[test]
     fn test_multi_tcp_read() {
-        block_on(async move {
-            let mut listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async move {
+                let mut listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let mut connect_streams = vec![];
-            let mut accept_streams = vec![];
+                let mut connect_streams = vec![];
+                let mut accept_streams = vec![];
 
-            // create many tcp so we can test if the GroupBuffer select can create a new GroupBuffer
-            // when no available GroupBuffer
-            for _ in 0..20 {
-                let handle = thread::spawn(move || {
-                    let result = listener.accept().map(|(stream, _)| stream);
-                    (listener, result)
+                // create many tcp so we can test if the GroupBuffer select can create a new GroupBuffer
+                // when no available GroupBuffer
+                for _ in 0..20 {
+                    let handle = thread::spawn(move || {
+                        let result = listener.accept().map(|(stream, _)| stream);
+                        (listener, result)
+                    });
+
+                    let connect_stream = TcpStream::connect(addr).await.unwrap();
+
+                    let (l, accept_stream) = handle.join().unwrap();
+                    let accept_stream = accept_stream.unwrap();
+
+                    listener = l;
+
+                    connect_streams.push(connect_stream);
+                    accept_streams.push(accept_stream);
+                }
+
+                accept_streams.iter_mut().for_each(|accept_stream| {
+                    accept_stream.write_all(b"test").unwrap();
                 });
 
-                let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut read_tasks = vec![];
 
-                let (l, accept_stream) = handle.join().unwrap();
-                let accept_stream = accept_stream.unwrap();
+                for mut connect_stream in connect_streams {
+                    let task = spawn(async move {
+                        connect_stream.read_exact(&mut [0; 4]).await.unwrap();
+                    });
 
-                listener = l;
+                    read_tasks.push(task);
+                }
 
-                connect_streams.push(connect_stream);
-                accept_streams.push(accept_stream);
-            }
-
-            accept_streams.iter_mut().for_each(|accept_stream| {
-                accept_stream.write_all(b"test").unwrap();
-            });
-
-            let mut read_tasks = vec![];
-
-            for mut connect_stream in connect_streams {
-                let task = spawn(async move {
-                    connect_stream.read_exact(&mut [0; 4]).await.unwrap();
-                });
-
-                read_tasks.push(task);
-            }
-
-            for task in read_tasks {
-                task.await;
-            }
-        })
+                for task in read_tasks {
+                    task.await;
+                }
+            })
     }
 
     #[test]
     fn test_peer_close() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (accept_stream, _) = handle.join().unwrap().unwrap();
+                let (accept_stream, _) = handle.join().unwrap().unwrap();
 
-            drop(accept_stream);
+                drop(accept_stream);
 
-            let mut buf = [0; 1];
+                let mut buf = [0; 1];
 
-            let n = connect_stream.read(&mut buf).await.unwrap();
+                let n = connect_stream.read(&mut buf).await.unwrap();
 
-            assert_eq!(n, 0);
-        })
+                assert_eq!(n, 0);
+            })
     }
 
     #[test]
     fn test_close() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            drop(connect_stream);
+                drop(connect_stream);
 
-            let mut buf = [0; 1];
+                let mut buf = [0; 1];
 
-            let n = accept_stream.read(&mut buf).unwrap();
+                let n = accept_stream.read(&mut buf).unwrap();
 
-            assert_eq!(n, 0);
-        })
+                assert_eq!(n, 0);
+            })
     }
 
     #[test]
     fn test_async_close() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            connect_stream.close().await.unwrap();
+                connect_stream.close().await.unwrap();
 
-            let n = accept_stream.read(&mut [0; 1]).unwrap();
+                let n = accept_stream.read(&mut [0; 1]).unwrap();
 
-            assert_eq!(n, 0);
-        })
+                assert_eq!(n, 0);
+            })
     }
 
     #[test]
     fn split() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            let (mut read, mut write) = connect_stream.split_half();
+                let (mut read, mut write) = connect_stream.split_half();
 
-            let mut buf = [0; 4];
+                let mut buf = [0; 4];
 
-            write.write_all(b"test").await.unwrap();
-            accept_stream.read_exact(&mut buf).unwrap();
+                write.write_all(b"test").await.unwrap();
+                accept_stream.read_exact(&mut buf).unwrap();
 
-            assert_eq!(&buf, b"test");
+                assert_eq!(&buf, b"test");
 
-            accept_stream.write_all(b"test").unwrap();
-            read.read_exact(&mut buf).await.unwrap();
+                accept_stream.write_all(b"test").unwrap();
+                read.read_exact(&mut buf).await.unwrap();
 
-            assert_eq!(&buf, b"test");
-        })
+                assert_eq!(&buf, b"test");
+            })
     }
 
     #[test]
     fn into_split() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            let (mut read, mut write) = connect_stream.into_split();
+                let (mut read, mut write) = connect_stream.into_split();
 
-            let mut buf = [0; 4];
+                let mut buf = [0; 4];
 
-            write.write_all(b"test").await.unwrap();
-            accept_stream.read_exact(&mut buf).unwrap();
+                write.write_all(b"test").await.unwrap();
+                accept_stream.read_exact(&mut buf).unwrap();
 
-            assert_eq!(&buf, b"test");
+                assert_eq!(&buf, b"test");
 
-            accept_stream.write_all(b"test").unwrap();
-            read.read_exact(&mut buf).await.unwrap();
+                accept_stream.write_all(b"test").unwrap();
+                read.read_exact(&mut buf).await.unwrap();
 
-            assert_eq!(&buf, b"test");
+                assert_eq!(&buf, b"test");
 
-            // test for check if reunite works well or not
-            let mut connect_stream = read.reunite(write).unwrap();
+                // test for check if reunite works well or not
+                let mut connect_stream = read.reunite(write).unwrap();
 
-            connect_stream.write_all(b"test").await.unwrap();
-            accept_stream.read_exact(&mut buf).unwrap();
-        })
+                connect_stream.write_all(b"test").await.unwrap();
+                accept_stream.read_exact(&mut buf).unwrap();
+            })
     }
 
     #[test]
     fn test_shutdown_write() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            connect_stream.shutdown(HowShutdown::Write).await.unwrap();
+                connect_stream.shutdown(HowShutdown::Write).await.unwrap();
 
-            let n = accept_stream.read(&mut [0; 1]).unwrap();
+                let n = accept_stream.read(&mut [0; 1]).unwrap();
 
-            assert_eq!(n, 0);
-        })
+                assert_eq!(n, 0);
+            })
     }
 
     #[test]
     fn test_shutdown_read() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let connect_stream = TcpStream::connect(addr).await.unwrap();
+                let connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (_accept_stream, _) = handle.join().unwrap().unwrap();
+                let (_accept_stream, _) = handle.join().unwrap().unwrap();
 
-            // actually I don't think there's people use BiLock to do this job, but here BiLock make
-            // the test easier
-            let (use_to_shutdown, use_to_read) = BiLock::new(connect_stream);
+                // actually I don't think there's people use BiLock to do this job, but here BiLock make
+                // the test easier
+                let (use_to_shutdown, use_to_read) = BiLock::new(connect_stream);
 
-            let task = spawn(async move {
-                use_to_read
+                let task = spawn(async move {
+                    use_to_read
+                        .lock()
+                        .await
+                        .as_pin_mut()
+                        .read(&mut [0; 1])
+                        .await
+                        .unwrap()
+                });
+
+                thread::sleep(Duration::from_secs(1));
+
+                use_to_shutdown
                     .lock()
                     .await
-                    .as_pin_mut()
-                    .read(&mut [0; 1])
+                    .shutdown(HowShutdown::Read)
                     .await
-                    .unwrap()
-            });
+                    .unwrap();
 
-            thread::sleep(Duration::from_secs(1));
-
-            use_to_shutdown
-                .lock()
-                .await
-                .shutdown(HowShutdown::Read)
-                .await
-                .unwrap();
-
-            assert_eq!(task.await, 0);
-        })
+                assert_eq!(task.await, 0);
+            })
     }
 
     #[test]
     fn test_peek() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || listener.accept());
+                let handle = thread::spawn(move || listener.accept());
 
-            let mut connect_stream = TcpStream::connect(addr).await.unwrap();
+                let mut connect_stream = TcpStream::connect(addr).await.unwrap();
 
-            let (mut accept_stream, _) = handle.join().unwrap().unwrap();
+                let (mut accept_stream, _) = handle.join().unwrap().unwrap();
 
-            accept_stream.write_all(b"test").unwrap();
+                accept_stream.write_all(b"test").unwrap();
 
-            let mut buf = [0; 4];
+                let mut buf = [0; 4];
 
-            dbg!("written");
+                dbg!("written");
 
-            let n = connect_stream.peek(&mut buf).await.unwrap();
-            assert!(n <= 4);
+                let n = connect_stream.peek(&mut buf).await.unwrap();
+                assert!(n <= 4);
 
-            assert_eq!(&buf[..n], &b"test"[..n]);
+                assert_eq!(&buf[..n], &b"test"[..n]);
 
-            // check if the data loss or not
-            let n = connect_stream.peek(&mut buf).await.unwrap();
-            assert!(n <= 4);
+                // check if the data loss or not
+                let n = connect_stream.peek(&mut buf).await.unwrap();
+                assert!(n <= 4);
 
-            assert_eq!(&buf[..n], &b"test"[..n]);
+                assert_eq!(&buf[..n], &b"test"[..n]);
 
-            connect_stream.read_exact(&mut buf).await.unwrap();
-            assert_eq!(&buf, b"test");
-        })
+                connect_stream.read_exact(&mut buf).await.unwrap();
+                assert_eq!(&buf, b"test");
+            })
     }
 }

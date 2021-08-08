@@ -23,237 +23,290 @@ thread_local! {
     static TASK_RECEIVER: RefCell<Option<Receiver<Runnable>>> = RefCell::new(None);
 }
 
-/// return false if driver is init before
-fn init_driver(sq_poll: Option<Duration>) -> bool {
-    DRIVER.with(|driver| {
-        let mut driver = driver.borrow_mut();
-        if driver.is_some() {
-            false
-        } else {
-            let ring_driver =
-                Driver::new(sq_poll).unwrap_or_else(|err| panic!("init Driver failed: {}", err));
-
-            driver.replace(ring_driver);
-
-            true
-        }
-    })
+#[derive(Debug, Clone, Default)]
+pub struct Builder {
+    sq_poll: Option<Duration>,
+    sq_poll_cpu: Option<u32>,
+    io_poll: bool,
 }
 
-/// return false if task sender and receiver is init before
-fn init_task_sender_and_receiver() -> bool {
-    let (sender, receiver) = crossbeam_channel::unbounded();
+impl Builder {
+    pub fn sq_poll<T: Into<Option<Duration>>>(self, sq_poll: T) -> Self {
+        Self {
+            sq_poll: sq_poll.into(),
+            ..self
+        }
+    }
 
-    TASK_SENDER
-        .with(|task_sender| {
-            let mut task_sender = task_sender.borrow_mut();
+    pub fn sq_poll_cpu<T: Into<Option<u32>>>(self, sq_poll_cpu: T) -> Self {
+        Self {
+            sq_poll_cpu: sq_poll_cpu.into(),
+            ..self
+        }
+    }
 
-            if task_sender.is_some() {
+    pub fn io_poll(self, io_poll: bool) -> Self {
+        Self { io_poll, ..self }
+    }
+
+    pub fn build(self) -> Result<Runtime, Error> {
+        let driver = Driver::new(self.sq_poll, self.sq_poll_cpu, self.io_poll)?;
+
+        Ok(Runtime {
+            driver: Some(driver),
+        })
+    }
+}
+
+pub struct Runtime {
+    driver: Option<Driver>,
+}
+
+impl Runtime {
+    pub fn builder() -> Builder {
+        Default::default()
+    }
+
+    pub fn block_on<F>(&mut self, fut: F) -> F::Output
+    where
+        F: Future + 'static + Send,
+        F::Output: 'static + Send,
+    {
+        const MAX_RUN_TASK_COUNT: u8 = 64;
+
+        self.init_driver();
+        self.init_task_sender_and_receiver();
+
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+
+        spawn(async move {
+            let result = fut.await;
+            sender.send(result).unwrap();
+        })
+        .detach();
+
+        loop {
+            // if the main future is ready, return the result immediately
+            if let Ok(result) = receiver.try_recv() {
+                return result;
+            }
+
+            // if no task can run, it may need yield this thread
+            let need_yield = TASK_RECEIVER.with(|task_receiver| {
+                let mut task_receiver = task_receiver.borrow_mut();
+                let task_receiver = task_receiver.as_mut().unwrap();
+
+                // we can't run too many task in a round, it may starve the IO
+                let available_run_task_count = MAX_RUN_TASK_COUNT;
+
+                for i in 0..available_run_task_count {
+                    match task_receiver.try_recv() {
+                        Ok(runnable) => {
+                            runnable.run();
+                        }
+
+                        Err(TryRecvError::Disconnected) => unreachable!(),
+                        Err(TryRecvError::Empty) => {
+                            return i == 0;
+                        }
+                    }
+                }
+
                 false
-            } else {
-                task_sender.replace(sender);
+            });
 
-                true
-            }
-        })
-        .then(|| {
-            TASK_RECEIVER.with(|task_receiver| {
-                task_receiver.borrow_mut().replace(receiver);
-            })
-        })
-        .is_some()
-}
+            let empty_cq_and_no_wait_wakers = DRIVER.with(|driver| {
+                let mut driver = driver.borrow_mut();
+                let driver = driver.as_mut().unwrap();
 
-pub fn block_on<F>(fut: F) -> F::Output
-where
-    F: Future + 'static + Send,
-    F::Output: 'static + Send,
-{
-    const MAX_RUN_TASK_COUNT: u8 = 64;
+                let cq = driver.ring.completion();
 
-    init_driver(None);
-    init_task_sender_and_receiver();
+                if cq.is_empty() {
+                    // let driver.try_run_all_wait_sqes works
+                    drop(cq);
 
-    let (sender, receiver) = crossbeam_channel::bounded(1);
+                    driver.try_run_all_wait_sqes();
 
-    spawn(async move {
-        let result = fut.await;
-        sender.send(result).unwrap();
-    })
-    .detach();
-
-    loop {
-        // if the main future is ready, return the result immediately
-        if let Ok(result) = receiver.try_recv() {
-            return result;
-        }
-
-        // if no task can run, it may need yield this thread
-        let need_yield = TASK_RECEIVER.with(|task_receiver| {
-            let mut task_receiver = task_receiver.borrow_mut();
-            let task_receiver = task_receiver.as_mut().unwrap();
-
-            // we can't run too many task in a round, it may starve the IO
-            let available_run_task_count = MAX_RUN_TASK_COUNT;
-
-            for i in 0..available_run_task_count {
-                match task_receiver.try_recv() {
-                    Ok(runnable) => {
-                        runnable.run();
+                    if driver.wait_for_push_wakers.is_empty() {
+                        return true;
                     }
 
-                    Err(TryRecvError::Disconnected) => unreachable!(),
-                    Err(TryRecvError::Empty) => {
-                        return i == 0;
+                    for waker in driver.wait_for_push_wakers.drain(..) {
+                        waker.wake();
                     }
-                }
-            }
 
-            false
-        });
-
-        let empty_cq_and_no_wait_wakers = DRIVER.with(|driver| {
-            let mut driver = driver.borrow_mut();
-            let driver = driver.as_mut().unwrap();
-
-            let cq = driver.ring.completion();
-
-            if cq.is_empty() {
-                // let driver.try_run_all_wait_sqes works
-                drop(cq);
-
-                driver.try_run_all_wait_sqes();
-
-                if driver.wait_for_push_wakers.is_empty() {
-                    return true;
+                    return false;
                 }
 
-                for waker in driver.wait_for_push_wakers.drain(..) {
-                    waker.wake();
-                }
+                // if we don't collect to a Vec, we can't use the driver again
+                let cq = cq.collect::<Vec<_>>();
 
-                return false;
-            }
+                for cqe in cq {
+                    let user_data = cqe.user_data();
 
-            // if we don't collect to a Vec, we can't use the driver again
-            let cq = cq.collect::<Vec<_>>();
+                    // means this cqe is a cancel cqe
+                    if user_data == 0 {
+                        continue;
+                    }
 
-            for cqe in cq {
-                let user_data = cqe.user_data();
+                    let result = cqe.result();
 
-                // means this cqe is a cancel cqe
-                if user_data == 0 {
-                    continue;
-                }
+                    // this cqe is canceled
+                    if result == -libc::ECANCELED {
+                        if let Some(callback) = driver.take_callback(cqe.user_data()) {
+                            match callback {
+                                Callback::ProvideBuffer { .. } => {
+                                    unreachable!("ProvideBuffers event won't be canceled")
+                                }
 
-                let result = cqe.result();
+                                // at normal, a event with wakeup callback won't be canceled without
+                                // runtime help, but wake up the waker may be a good idea
+                                Callback::Wakeup { waker } => {
+                                    driver.completion_queue_entries.insert(cqe.user_data(), cqe);
 
-                // this cqe is canceled
-                if result == -libc::ECANCELED {
-                    if let Some(callback) = driver.take_callback(cqe.user_data()) {
-                        match callback {
-                            Callback::ProvideBuffer { .. } => {
-                                unreachable!("ProvideBuffers event won't be canceled")
+                                    waker.wake();
+                                }
+
+                                // a read event is canceled
+                                Callback::CancelRead { group_id } => {
+                                    if let Some(buffer_id) = buffer_select(cqe.flags()) {
+                                        driver.give_back_buffer_with_id(group_id, buffer_id);
+                                    }
+                                }
+
+                                Callback::CancelConnect { addr: _, fd } => {
+                                    let _ = unistd::close(fd);
+                                }
+
+                                // no need to do anything
+                                Callback::CancelOpenAt { .. }
+                                | Callback::CancelStatx { .. }
+                                | Callback::CancelRenameAt { .. }
+                                | Callback::CancelUnlinkAt { .. }
+                                | Callback::CancelTimeout { .. } => {}
                             }
 
-                            // at normal, a event with wakeup callback won't be canceled without
-                            // runtime help, but wake up the waker may be a good idea
+                            continue;
+                        }
+                    }
+
+                    if let Some(callback) = driver.callbacks.remove(&user_data) {
+                        match callback {
+                            Callback::ProvideBuffer { group_id } => {
+                                if cqe.is_err() {
+                                    panic!(
+                                        "unexpect error for ProvideBuffers {}, user_data {}",
+                                        Error::from_raw_os_error(-cqe.result()),
+                                        user_data
+                                    );
+                                }
+
+                                let group_buffer = driver
+                                    .buffer_manager
+                                    .group_buffer_mut(group_id)
+                                    .unwrap_or_else(|| {
+                                        panic!("group buffer {} not exist", group_id)
+                                    });
+
+                                if group_buffer.register_state()
+                                    == GroupBufferRegisterState::Registering
+                                {
+                                    group_buffer.set_can_be_selected();
+                                } else {
+                                    group_buffer.increase_available();
+                                }
+                            }
+
                             Callback::Wakeup { waker } => {
                                 driver.completion_queue_entries.insert(cqe.user_data(), cqe);
 
                                 waker.wake();
                             }
 
-                            // a read event is canceled
+                            // an ready read event is canceled
                             Callback::CancelRead { group_id } => {
-                                if let Some(buffer_id) = buffer_select(cqe.flags()) {
-                                    driver.give_back_buffer_with_id(group_id, buffer_id);
-                                }
+                                let buffer_id =
+                                    buffer_select(cqe.flags()).expect("buffer id not found");
+
+                                driver.give_back_buffer_with_id(group_id, buffer_id);
                             }
 
                             Callback::CancelConnect { addr: _, fd } => {
                                 let _ = unistd::close(fd);
                             }
 
-                            // no need to do anything
+                            // no need to do
                             Callback::CancelOpenAt { .. }
                             | Callback::CancelStatx { .. }
                             | Callback::CancelRenameAt { .. }
                             | Callback::CancelUnlinkAt { .. }
                             | Callback::CancelTimeout { .. } => {}
                         }
-
-                        continue;
                     }
                 }
 
-                if let Some(callback) = driver.callbacks.remove(&user_data) {
-                    match callback {
-                        Callback::ProvideBuffer { group_id } => {
-                            if cqe.is_err() {
-                                panic!(
-                                    "unexpect error for ProvideBuffers {}, user_data {}",
-                                    Error::from_raw_os_error(-cqe.result()),
-                                    user_data
-                                );
-                            }
-
-                            let group_buffer = driver
-                                .buffer_manager
-                                .group_buffer_mut(group_id)
-                                .unwrap_or_else(|| panic!("group buffer {} not exist", group_id));
-
-                            if group_buffer.register_state()
-                                == GroupBufferRegisterState::Registering
-                            {
-                                group_buffer.set_can_be_selected();
-                            } else {
-                                group_buffer.increase_available();
-                            }
-                        }
-
-                        Callback::Wakeup { waker } => {
-                            driver.completion_queue_entries.insert(cqe.user_data(), cqe);
-
-                            waker.wake();
-                        }
-
-                        // an ready read event is canceled
-                        Callback::CancelRead { group_id } => {
-                            let buffer_id =
-                                buffer_select(cqe.flags()).expect("buffer id not found");
-
-                            driver.give_back_buffer_with_id(group_id, buffer_id);
-                        }
-
-                        Callback::CancelConnect { addr: _, fd } => {
-                            let _ = unistd::close(fd);
-                        }
-
-                        // no need to do
-                        Callback::CancelOpenAt { .. }
-                        | Callback::CancelStatx { .. }
-                        | Callback::CancelRenameAt { .. }
-                        | Callback::CancelUnlinkAt { .. }
-                        | Callback::CancelTimeout { .. } => {}
-                    }
+                // wake up all waiting tasks
+                for waker in driver.wait_for_push_wakers.drain(..) {
+                    waker.wake();
                 }
+
+                // try to push all background sqes
+                driver.try_run_all_wait_sqes();
+
+                false
+            });
+
+            if need_yield && empty_cq_and_no_wait_wakers {
+                thread::yield_now();
             }
+        }
+    }
 
-            // wake up all waiting tasks
-            for waker in driver.wait_for_push_wakers.drain(..) {
-                waker.wake();
-            }
+    fn init_driver(&mut self) {
+        DRIVER.with(|driver| {
+            let runtime_driver = self.driver.take().expect("Driver is not created");
 
-            // try to push all background sqes
-            driver.try_run_all_wait_sqes();
+            driver.borrow_mut().replace(runtime_driver);
+        })
+    }
 
-            false
+    fn init_task_sender_and_receiver(&mut self) -> bool {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+
+        TASK_SENDER
+            .with(|task_sender| {
+                let mut task_sender = task_sender.borrow_mut();
+
+                if task_sender.is_some() {
+                    false
+                } else {
+                    task_sender.replace(sender);
+
+                    true
+                }
+            })
+            .then(|| {
+                TASK_RECEIVER.with(|task_receiver| {
+                    task_receiver.borrow_mut().replace(receiver);
+                })
+            })
+            .is_some()
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        TASK_SENDER.with(|task_sender| {
+            task_sender.borrow_mut().take();
         });
 
-        if need_yield && empty_cq_and_no_wait_wakers {
-            thread::yield_now();
-        }
+        TASK_RECEIVER.with(|task_receiver| {
+            task_receiver.borrow_mut().take();
+        });
+
+        DRIVER.with(|driver| {
+            driver.borrow_mut().take();
+        });
     }
 }
 
@@ -376,7 +429,10 @@ mod tests {
 
     #[test]
     fn test_simple_task() {
-        let n = block_on(async { 1 });
+        let n = Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async { 1 });
 
         assert_eq!(n, 1);
     }
@@ -387,30 +443,39 @@ mod tests {
 
     #[test]
     fn test_call_func() {
-        let n = block_on(async { test_func1(10).await });
+        let n = Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async { test_func1(10).await });
 
         assert_eq!(n, 20);
     }
 
     #[test]
     fn test_simple_spawn() {
-        let n = block_on(async {
-            let task = spawn(async { 1 });
+        let n = Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let task = spawn(async { 1 });
 
-            task.await
-        });
+                task.await
+            });
 
         assert_eq!(n, 1);
     }
 
     #[test]
     fn test_multi_spawn() {
-        let (n1, n2) = block_on(async {
-            let task1 = spawn(async { 1 });
-            let task2 = spawn(async { 2 });
+        let (n1, n2) = Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let task1 = spawn(async { 1 });
+                let task2 = spawn(async { 2 });
 
-            (task1.await, task2.await)
-        });
+                (task1.await, task2.await)
+            });
 
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
@@ -418,27 +483,30 @@ mod tests {
 
     #[test]
     fn test_spawn_blocking() {
-        let (n1, n2, n3) = block_on(async {
-            let task3 = spawn_blocking(|| {
-                thread::sleep(Duration::from_secs(1));
+        let (n1, n2, n3) = Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let task3 = spawn_blocking(|| {
+                    thread::sleep(Duration::from_secs(1));
 
-                3
+                    3
+                });
+
+                let task1 = spawn(async { 1 });
+                let task2 = spawn(async { 2 });
+
+                let n1 = task1.await;
+                dbg!(n1);
+
+                let n2 = task2.await;
+                dbg!(n2);
+
+                let n3 = task3.await;
+                dbg!(n3);
+
+                (n1, n2, n3)
             });
-
-            let task1 = spawn(async { 1 });
-            let task2 = spawn(async { 2 });
-
-            let n1 = task1.await;
-            dbg!(n1);
-
-            let n2 = task2.await;
-            dbg!(n2);
-
-            let n3 = task3.await;
-            dbg!(n3);
-
-            (n1, n2, n3)
-        });
 
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
@@ -447,8 +515,11 @@ mod tests {
 
     #[test]
     fn run_with_futures_timer() {
-        block_on(async {
-            futures_timer::Delay::new(Duration::from_secs(1)).await;
-        })
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                futures_timer::Delay::new(Duration::from_secs(1)).await;
+            })
     }
 }

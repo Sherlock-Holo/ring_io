@@ -160,7 +160,8 @@ mod tests {
     use super::*;
     use crate::fs::{self, File};
     use crate::net::{TcpListener, TcpStream};
-    use crate::{block_on, spawn};
+    use crate::runtime::Runtime;
+    use crate::spawn;
 
     #[test]
     fn create_splice() {
@@ -169,37 +170,40 @@ mod tests {
 
     #[test]
     fn test_file_to_tcp() {
-        block_on(async {
-            let listener = TcpListener::bind("0.0.0.0:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            let task = spawn(async move { TcpStream::connect(addr).await.unwrap() });
+                let task = spawn(async move { TcpStream::connect(addr).await.unwrap() });
 
-            let accept_stream = listener.accept().await.unwrap();
-            let mut conn_stream = task.await;
+                let accept_stream = listener.accept().await.unwrap();
+                let mut conn_stream = task.await;
 
-            let file = File::open("testdata/book.txt").await.unwrap();
+                let file = File::open("testdata/book.txt").await.unwrap();
 
-            let mut splice = Splice::new().unwrap();
+                let mut splice = Splice::new().unwrap();
 
-            let copied = splice.copy(file, accept_stream.as_raw_fd()).await.unwrap();
+                let copied = splice.copy(file, accept_stream.as_raw_fd()).await.unwrap();
 
-            dbg!(copied);
+                dbg!(copied);
 
-            drop(accept_stream);
+                drop(accept_stream);
 
-            let mut buf = vec![];
+                let mut buf = vec![];
 
-            let n = conn_stream.read_to_end(&mut buf).await.unwrap();
+                let n = conn_stream.read_to_end(&mut buf).await.unwrap();
 
-            dbg!(n);
+                dbg!(n);
 
-            buf.truncate(n);
+                buf.truncate(n);
 
-            let data = fs::read("testdata/book.txt").await.unwrap();
+                let data = fs::read("testdata/book.txt").await.unwrap();
 
-            assert_eq!(data, buf);
-            assert_eq!(copied, n as _);
-        })
+                assert_eq!(data, buf);
+                assert_eq!(copied, n as _);
+            })
     }
 }

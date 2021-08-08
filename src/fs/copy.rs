@@ -42,69 +42,78 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::block_on;
     use crate::fs::{self, metadata};
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_copy_file() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            let size = metadata("testdata/book.txt").await.unwrap().len();
+                let size = metadata("testdata/book.txt").await.unwrap().len();
 
-            let copied = copy("testdata/book.txt", file.path()).await.unwrap();
+                let copied = copy("testdata/book.txt", file.path()).await.unwrap();
 
-            assert_eq!(copied, size);
+                assert_eq!(copied, size);
 
-            let origin_data = fs::read("testdata/book.txt").await.unwrap();
+                let origin_data = fs::read("testdata/book.txt").await.unwrap();
 
-            let copied_data = fs::read(file.path()).await.unwrap();
+                let copied_data = fs::read(file.path()).await.unwrap();
 
-            assert_eq!(origin_data, copied_data);
-        })
+                assert_eq!(origin_data, copied_data);
+            })
     }
 
     #[test]
     fn test_copy_to_not_exist_file() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let mut path = tmp_dir.path().to_path_buf();
-            path.push("test");
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let mut path = tmp_dir.path().to_path_buf();
+                path.push("test");
 
-            let size = metadata("testdata/book.txt").await.unwrap().len();
+                let size = metadata("testdata/book.txt").await.unwrap().len();
 
-            let copied = copy("testdata/book.txt", &path).await.unwrap();
+                let copied = copy("testdata/book.txt", &path).await.unwrap();
 
-            assert_eq!(copied, size);
+                assert_eq!(copied, size);
 
-            let origin_data = fs::read("testdata/book.txt").await.unwrap();
+                let origin_data = fs::read("testdata/book.txt").await.unwrap();
 
-            let copied_data = fs::read(&path).await.unwrap();
+                let copied_data = fs::read(&path).await.unwrap();
 
-            assert_eq!(origin_data, copied_data);
-        })
+                assert_eq!(origin_data, copied_data);
+            })
     }
 
     #[test]
     fn test_copy_truncate_file() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let mut file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let mut file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            file.write_all(b"test").unwrap();
+                file.write_all(b"test").unwrap();
 
-            let size = metadata("testdata/book.txt").await.unwrap().len();
+                let size = metadata("testdata/book.txt").await.unwrap().len();
 
-            let copied = copy("testdata/book.txt", file.path()).await.unwrap();
+                let copied = copy("testdata/book.txt", file.path()).await.unwrap();
 
-            assert_eq!(copied, size);
+                assert_eq!(copied, size);
 
-            let origin_data = fs::read("testdata/book.txt").await.unwrap();
+                let origin_data = fs::read("testdata/book.txt").await.unwrap();
 
-            let copied_data = fs::read(file.path()).await.unwrap();
+                let copied_data = fs::read(file.path()).await.unwrap();
 
-            assert_eq!(origin_data, copied_data);
-        })
+                assert_eq!(origin_data, copied_data);
+            })
     }
 }

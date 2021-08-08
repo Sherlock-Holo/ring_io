@@ -21,3 +21,11 @@ pin-project-lite = "0.2"
 futures-util = { version = "0.3", features = ["io", "bilock", "unstable"], default-features = false }
 tempfile = "3.2"
 futures-timer = "3.0"
+
+[[example]]
+name = "tcp_copy"
+path = "examples/tcp_copy.rs"
+
+[[example]]
+name = "tcp_splice_copy"
+path = "examples/tcp_splice_copy.rs"

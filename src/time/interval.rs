@@ -64,22 +64,25 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_interval() {
-        block_on(async {
-            let mut interval = interval(Duration::from_secs(1));
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let mut interval = interval(Duration::from_secs(1));
 
-            let start = Instant::now();
+                let start = Instant::now();
 
-            interval.next().await.unwrap();
+                interval.next().await.unwrap();
 
-            assert_eq!(start.elapsed().as_secs(), 1);
+                assert_eq!(start.elapsed().as_secs(), 1);
 
-            interval.next().await.unwrap();
+                interval.next().await.unwrap();
 
-            assert_eq!(start.elapsed().as_secs(), 2);
-        })
+                assert_eq!(start.elapsed().as_secs(), 2);
+            })
     }
 }

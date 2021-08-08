@@ -109,21 +109,24 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_rename() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let mut new_path = tmp_dir.path().to_path_buf();
-            new_path.push("new-file");
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let mut new_path = tmp_dir.path().to_path_buf();
+                new_path.push("new-file");
 
-            let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+                let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            rename(tmp_file.path(), &new_path).await.unwrap();
+                rename(tmp_file.path(), &new_path).await.unwrap();
 
-            let metadata = std::fs::metadata(new_path).unwrap();
-            assert!(metadata.is_file());
-        })
+                let metadata = std::fs::metadata(new_path).unwrap();
+                assert!(metadata.is_file());
+            })
     }
 }

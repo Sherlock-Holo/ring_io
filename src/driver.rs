@@ -84,13 +84,21 @@ pub struct Driver {
 }
 
 impl Driver {
-    pub fn new(sq_poll: Option<Duration>) -> Result<Self> {
+    pub fn new(sq_poll: Option<Duration>, sq_poll_cpu: Option<u32>, io_poll: bool) -> Result<Self> {
         let mut builder = IoUring::builder();
 
         if let Some(sq_poll) = sq_poll {
             let sq_poll = sq_poll.as_millis();
 
             builder.setup_sqpoll(sq_poll as _);
+        }
+
+        if let Some(sq_poll_cpu) = sq_poll_cpu {
+            builder.setup_sqpoll_cpu(sq_poll_cpu);
+        }
+
+        if io_poll {
+            builder.setup_iopoll();
         }
 
         let ring = builder.build(4096)?;

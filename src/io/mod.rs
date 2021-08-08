@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io::{IoSlice, IoSliceMut};
 use std::marker::PhantomData;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -44,6 +45,12 @@ impl<'a> AsyncRead for ReadHalf<'a> {
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<std::io::Result<usize>> {
         Pin::new(&mut self.get_mut().ring_fd).poll_read_vectored(cx, bufs)
+    }
+}
+
+impl<'a> AsRawFd for ReadHalf<'a> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.ring_fd.as_raw_fd()
     }
 }
 
@@ -90,6 +97,12 @@ impl<'a> AsyncWrite for WriteHalf<'a> {
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().ring_fd).poll_close(cx)
+    }
+}
+
+impl<'a> AsRawFd for WriteHalf<'a> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.ring_fd.as_raw_fd()
     }
 }
 
@@ -183,6 +196,17 @@ impl<T> AsyncBufRead for OwnedReadHalf<T> {
     }
 }
 
+impl<T> AsRawFd for OwnedReadHalf<T> {
+    fn as_raw_fd(&self) -> RawFd {
+        let ring_fd = self.ring_fd.get();
+
+        // Safety: only 1 OwnedReadHalf exists
+        let ring_fd = unsafe { &mut *ring_fd };
+
+        ring_fd.as_raw_fd()
+    }
+}
+
 pub struct OwnedWriteHalf<T> {
     ring_fd: Arc<UnsafeCell<RingFd>>,
     _phantom_data: PhantomData<T>,
@@ -250,6 +274,17 @@ impl<T> AsyncWrite for OwnedWriteHalf<T> {
         let ring_fd = unsafe { &mut *ring_fd };
 
         Pin::new(ring_fd).poll_close(cx)
+    }
+}
+
+impl<T> AsRawFd for OwnedWriteHalf<T> {
+    fn as_raw_fd(&self) -> RawFd {
+        let ring_fd = self.ring_fd.get();
+
+        // Safety: only 1 OwnedWriteHalf exists
+        let ring_fd = unsafe { &mut *ring_fd };
+
+        ring_fd.as_raw_fd()
     }
 }
 

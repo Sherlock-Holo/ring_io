@@ -298,84 +298,96 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_get_file_metadata() {
-        block_on(async {
-            let tmp_file = NamedTempFile::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_file = NamedTempFile::new_in(env::temp_dir()).unwrap();
 
-            let metadata = metadata(tmp_file.path()).await.unwrap();
+                let metadata = metadata(tmp_file.path()).await.unwrap();
 
-            assert!(metadata.file_type().is_file());
-            assert!(metadata.is_file());
+                assert!(metadata.file_type().is_file());
+                assert!(metadata.is_file());
 
-            dbg!(metadata.accessed().unwrap());
-            dbg!(metadata.modified().unwrap());
-            dbg!(metadata.created().unwrap());
-            dbg!(metadata.permissions().readonly());
-        })
+                dbg!(metadata.accessed().unwrap());
+                dbg!(metadata.modified().unwrap());
+                dbg!(metadata.created().unwrap());
+                dbg!(metadata.permissions().readonly());
+            })
     }
 
     #[test]
     fn test_get_dir_metadata() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
 
-            let metadata = metadata(tmp_dir.path()).await.unwrap();
+                let metadata = metadata(tmp_dir.path()).await.unwrap();
 
-            assert!(metadata.file_type().is_dir());
-            assert!(metadata.is_dir());
+                assert!(metadata.file_type().is_dir());
+                assert!(metadata.is_dir());
 
-            dbg!(metadata.accessed().unwrap());
-            dbg!(metadata.modified().unwrap());
-            dbg!(metadata.created().unwrap());
-            dbg!(metadata.permissions().readonly());
-        })
+                dbg!(metadata.accessed().unwrap());
+                dbg!(metadata.modified().unwrap());
+                dbg!(metadata.created().unwrap());
+                dbg!(metadata.permissions().readonly());
+            })
     }
 
     #[test]
     fn test_get_symlink_metadata() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            let mut symlink_path = tmp_dir.path().to_path_buf();
-            symlink_path.push("symlink");
+                let mut symlink_path = tmp_dir.path().to_path_buf();
+                symlink_path.push("symlink");
 
-            std::os::unix::fs::symlink(tmp_file.path(), &symlink_path).unwrap();
+                std::os::unix::fs::symlink(tmp_file.path(), &symlink_path).unwrap();
 
-            let metadata = metadata(symlink_path).await.unwrap();
+                let metadata = metadata(symlink_path).await.unwrap();
 
-            assert!(metadata.file_type().is_symlink());
+                assert!(metadata.file_type().is_symlink());
 
-            dbg!(metadata.accessed().unwrap());
-            dbg!(metadata.modified().unwrap());
-            dbg!(metadata.created().unwrap());
-            dbg!(metadata.permissions().readonly());
-        })
+                dbg!(metadata.accessed().unwrap());
+                dbg!(metadata.modified().unwrap());
+                dbg!(metadata.created().unwrap());
+                dbg!(metadata.permissions().readonly());
+            })
     }
 
     #[test]
     fn test_get_follow_symlink_metadata() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-            let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+                let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            let mut symlink_path = tmp_dir.path().to_path_buf();
-            symlink_path.push("symlink");
+                let mut symlink_path = tmp_dir.path().to_path_buf();
+                symlink_path.push("symlink");
 
-            std::os::unix::fs::symlink(tmp_file.path(), &symlink_path).unwrap();
+                std::os::unix::fs::symlink(tmp_file.path(), &symlink_path).unwrap();
 
-            let metadata = symlink_metadata(symlink_path).await.unwrap();
+                let metadata = symlink_metadata(symlink_path).await.unwrap();
 
-            assert!(metadata.file_type().is_file());
-            assert!(metadata.is_file());
+                assert!(metadata.file_type().is_file());
+                assert!(metadata.is_file());
 
-            dbg!(metadata.accessed().unwrap());
-            dbg!(metadata.modified().unwrap());
-            dbg!(metadata.created().unwrap());
-            dbg!(metadata.permissions().readonly());
-        })
+                dbg!(metadata.accessed().unwrap());
+                dbg!(metadata.modified().unwrap());
+                dbg!(metadata.created().unwrap());
+                dbg!(metadata.permissions().readonly());
+            })
     }
 }

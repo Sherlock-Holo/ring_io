@@ -1,4 +1,4 @@
-pub use runtime::{block_on, spawn, spawn_blocking};
+pub use runtime::{spawn, spawn_blocking};
 
 mod buffer;
 mod cqe_ext;

@@ -107,28 +107,34 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_sleep() {
-        block_on(async {
-            let start = Instant::now();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let start = Instant::now();
 
-            sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_secs(1)).await;
 
-            assert_eq!(start.elapsed().as_secs(), 1);
-        })
+                assert_eq!(start.elapsed().as_secs(), 1);
+            })
     }
 
     #[test]
     fn test_sleep_until() {
-        block_on(async {
-            let start = Instant::now();
-            let deadline = start + Duration::from_secs(1);
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let start = Instant::now();
+                let deadline = start + Duration::from_secs(1);
 
-            sleep_until(deadline).await;
+                sleep_until(deadline).await;
 
-            assert_eq!(start.elapsed().as_secs(), 1);
-        })
+                assert_eq!(start.elapsed().as_secs(), 1);
+            })
     }
 }

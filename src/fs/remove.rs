@@ -131,55 +131,67 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_remove_dir() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
 
-            remove_dir(tmp_dir.path()).await.unwrap();
+                remove_dir(tmp_dir.path()).await.unwrap();
 
-            let error = std::fs::metadata(tmp_dir.path()).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::NotFound);
-        })
+                let error = std::fs::metadata(tmp_dir.path()).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::NotFound);
+            })
     }
 
     #[test]
     fn test_remove_file() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
 
-            let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+                let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            remove_file(tmp_file.path()).await.unwrap();
+                remove_file(tmp_file.path()).await.unwrap();
 
-            let error = std::fs::metadata(tmp_file.path()).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::NotFound);
-        })
+                let error = std::fs::metadata(tmp_file.path()).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::NotFound);
+            })
     }
 
     #[test]
     fn test_remove_file_should_failed() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
 
-            // the IsADirectory is not stable
-            // assert_eq!(remove_file(tmp_dir.path()).await.unwrap_err().kind(), ErrorKind::IsADirectory);
-            dbg!(remove_file(tmp_dir.path()).await.unwrap_err().kind());
-        })
+                // the IsADirectory is not stable
+                // assert_eq!(remove_file(tmp_dir.path()).await.unwrap_err().kind(), ErrorKind::IsADirectory);
+                dbg!(remove_file(tmp_dir.path()).await.unwrap_err().kind());
+            })
     }
 
     #[test]
     fn test_remove_dir_should_failed() {
-        block_on(async {
-            let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
 
-            let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
+                let tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
 
-            // the NotADirectory is not stable
-            // assert_eq!(remove_dir(tmp_file.path()).await.unwrap_err().kind(), ErrorKind::NotADirectory);
-            dbg!(remove_dir(tmp_file.path()).await.unwrap_err().kind());
-        })
+                // the NotADirectory is not stable
+                // assert_eq!(remove_dir(tmp_file.path()).await.unwrap_err().kind(), ErrorKind::NotADirectory);
+                dbg!(remove_dir(tmp_file.path()).await.unwrap_err().kind());
+            })
     }
 }

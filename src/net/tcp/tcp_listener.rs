@@ -179,70 +179,94 @@ mod tests {
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::block_on;
+    use crate::runtime::Runtime;
 
     #[test]
     fn test_tcp_listener_bind() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
-        })
+                dbg!(addr);
+            })
     }
 
     #[test]
     fn test_tcp_listener_accept_v4() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || StdTcpStream::connect(addr));
+                let handle = thread::spawn(move || StdTcpStream::connect(addr));
 
-            let accept_stream = listener.accept().await.unwrap();
-            let connect_stream = handle.join().unwrap().unwrap();
+                let accept_stream = listener.accept().await.unwrap();
+                let connect_stream = handle.join().unwrap().unwrap();
 
-            assert_eq!(addr, connect_stream.peer_addr().unwrap());
-            assert_eq!(
-                accept_stream.peer_addr().unwrap(),
-                connect_stream.local_addr().unwrap()
-            );
-        })
+                assert_eq!(addr, connect_stream.peer_addr().unwrap());
+                assert_eq!(
+                    accept_stream.peer_addr().unwrap(),
+                    connect_stream.local_addr().unwrap()
+                );
+            })
     }
 
     #[test]
     fn test_tcp_listener_accept_v6() {
-        block_on(async {
-            let listener = TcpListener::bind("[::1]:0").unwrap();
-            let addr = listener.local_addr().unwrap();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("[::1]:0").unwrap();
+                let addr = listener.local_addr().unwrap();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            let handle = thread::spawn(move || StdTcpStream::connect(addr));
+                let handle = thread::spawn(move || StdTcpStream::connect(addr));
 
-            let accept_stream = listener.accept().await.unwrap();
-            let connect_stream = handle.join().unwrap().unwrap();
+                let accept_stream = listener.accept().await.unwrap();
+                let connect_stream = handle.join().unwrap().unwrap();
 
-            assert_eq!(addr, connect_stream.peer_addr().unwrap());
-            assert_eq!(
-                accept_stream.peer_addr().unwrap(),
-                connect_stream.local_addr().unwrap()
-            );
-        })
+                assert_eq!(addr, connect_stream.peer_addr().unwrap());
+                assert_eq!(
+                    accept_stream.peer_addr().unwrap(),
+                    connect_stream.local_addr().unwrap()
+                );
+            })
     }
 
     #[test]
     fn test_tcp_listener_incoming() {
-        block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let addr = listener.local_addr().unwrap();
-            let mut incoming = listener.incoming();
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+                let mut incoming = listener.incoming();
 
-            dbg!(addr);
+                dbg!(addr);
 
-            {
+                {
+                    let handle = thread::spawn(move || StdTcpStream::connect(addr));
+
+                    let accept_stream = incoming.next().await.unwrap().unwrap();
+                    let connect_stream = handle.join().unwrap().unwrap();
+
+                    assert_eq!(addr, connect_stream.peer_addr().unwrap());
+                    assert_eq!(
+                        accept_stream.peer_addr().unwrap(),
+                        connect_stream.local_addr().unwrap()
+                    );
+                }
+
                 let handle = thread::spawn(move || StdTcpStream::connect(addr));
 
                 let accept_stream = incoming.next().await.unwrap().unwrap();
@@ -253,18 +277,6 @@ mod tests {
                     accept_stream.peer_addr().unwrap(),
                     connect_stream.local_addr().unwrap()
                 );
-            }
-
-            let handle = thread::spawn(move || StdTcpStream::connect(addr));
-
-            let accept_stream = incoming.next().await.unwrap().unwrap();
-            let connect_stream = handle.join().unwrap().unwrap();
-
-            assert_eq!(addr, connect_stream.peer_addr().unwrap());
-            assert_eq!(
-                accept_stream.peer_addr().unwrap(),
-                connect_stream.local_addr().unwrap()
-            );
-        })
+            })
     }
 }
