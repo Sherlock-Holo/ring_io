@@ -10,6 +10,7 @@ use std::time::Duration;
 use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
 use io_uring::squeue::Entry as SqEntry;
+use io_uring::types::Timespec;
 use io_uring::{IoUring, Probe};
 use nix::sys::socket::SockAddr;
 
@@ -56,6 +57,12 @@ pub enum Callback {
 
     Wakeup {
         waker: Waker,
+    },
+
+    // save the Timespec in Box so no matter how to move the Timespec, won't break the pointer that
+    // in the io_uring
+    CancelTimeout {
+        timespec: Box<Timespec>,
     },
 }
 
@@ -507,6 +514,33 @@ impl Driver {
         // change the callback to CancelStatx
         self.callbacks
             .insert(user_data, Callback::CancelUnlinkAt { path });
+
+        Ok(())
+    }
+
+    /// cancel the timeout event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub fn cancel_timeout(&mut self, user_data: u64, timespec: Box<Timespec>) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        unsafe {
+            if self.ring.submission().push(&cancel_sqe).is_err() {
+                self.ring.submit()?;
+
+                if self.ring.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // change the callback to CancelTimeout
+        self.callbacks
+            .insert(user_data, Callback::CancelTimeout { timespec });
 
         Ok(())
     }

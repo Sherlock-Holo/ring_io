@@ -47,6 +47,7 @@ pub mod stdin {
         }
     }
 
+    #[derive(Debug)]
     pub struct StdinGuard<'a> {
         raw_guard: MutexGuard<'a, BufReader<RingFd>>,
     }
@@ -123,6 +124,7 @@ pub mod stdout_and_stderr {
         };
     }
 
+    #[derive(Debug)]
     pub struct Stdout(&'static Mutex<RingFd>);
 
     pub fn stdout() -> Stdout {
@@ -154,12 +156,14 @@ pub mod stdout_and_stderr {
         }
     }
 
+    #[derive(Debug)]
     pub struct StdoutGuard<'a>(MutexGuard<'a, RingFd>);
 
     impl<'a> AsyncWrite for StdoutGuard<'a> {
         wrapper_async_write!();
     }
 
+    #[derive(Debug)]
     pub struct Stderr(&'static Mutex<RingFd>);
 
     pub fn stderr() -> Stderr {
@@ -191,6 +195,7 @@ pub mod stdout_and_stderr {
         }
     }
 
+    #[derive(Debug)]
     pub struct StderrGuard<'a>(MutexGuard<'a, RingFd>);
 
     impl<'a> AsyncWrite for StderrGuard<'a> {

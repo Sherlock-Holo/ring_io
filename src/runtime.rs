@@ -179,7 +179,8 @@ where
                             Callback::CancelOpenAt { .. }
                             | Callback::CancelStatx { .. }
                             | Callback::CancelRenameAt { .. }
-                            | Callback::CancelUnlinkAt { .. } => {}
+                            | Callback::CancelUnlinkAt { .. }
+                            | Callback::CancelTimeout { .. } => {}
                         }
 
                         continue;
@@ -233,7 +234,8 @@ where
                         Callback::CancelOpenAt { .. }
                         | Callback::CancelStatx { .. }
                         | Callback::CancelRenameAt { .. }
-                        | Callback::CancelUnlinkAt { .. } => {}
+                        | Callback::CancelUnlinkAt { .. }
+                        | Callback::CancelTimeout { .. } => {}
                     }
                 }
             }
