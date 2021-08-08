@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
-use std::io::{Error, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::ptr;
@@ -174,6 +174,8 @@ impl AsyncBufRead for RingFd {
 
         match Pin::new(&mut buf_read_fut).poll(cx) {
             Poll::Ready(result) => match result {
+                // when interrupted happened, retry it.
+                Err(err) if err.kind() == ErrorKind::Interrupted => Self::poll_fill_buf(self, cx),
                 Err(err) => Poll::Ready(Err(err)),
                 Ok(buffer) => {
                     self.read_state = ReadState::Done(buffer);
@@ -270,7 +272,14 @@ impl AsyncWrite for RingFd {
 
                 self.write_state = WriteState::Idle { write_buffer };
 
-                Poll::Ready(result)
+                match result {
+                    // when interrupted happened, retry it.
+                    Err(err) if err.kind() == ErrorKind::Interrupted => {
+                        Self::poll_write(self, cx, buf)
+                    }
+
+                    result => Poll::Ready(result),
+                }
             }
 
             Poll::Pending => {

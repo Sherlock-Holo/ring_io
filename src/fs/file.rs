@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::future::Future;
-use std::io::{Error, Result, SeekFrom};
+use std::io::{Error, ErrorKind, Result, SeekFrom};
 use std::io::{IoSlice, IoSliceMut};
 use std::os::raw::c_int;
 use std::os::unix::fs::OpenOptionsExt;
@@ -165,7 +165,13 @@ impl AsyncSeek for File {
                 });
 
                 if let Poll::Ready(result) = task.poll_unpin(cx) {
-                    Poll::Ready(result)
+                    match result {
+                        // when interrupted happened, retry it.
+                        Err(err) if err.kind() == ErrorKind::Interrupted => {
+                            Self::poll_seek(self, cx, pos)
+                        }
+                        result => Poll::Ready(result),
+                    }
                 } else {
                     self.seek_task.replace(task);
 
