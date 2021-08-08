@@ -1,5 +1,6 @@
-pub use tcp::TcpListener;
-pub use tcp::TcpStream;
+pub use shutdown::Shutdown;
+pub use tcp::{TcpListener, TcpStream};
 
+mod peek;
+mod shutdown;
 pub mod tcp;
-pub mod udp;

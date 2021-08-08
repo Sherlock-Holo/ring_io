@@ -1,5 +1,5 @@
-pub use listener::TcpListener;
-pub use stream::*;
+pub use tcp_listener::TcpListener;
+pub use tcp_stream::TcpStream;
 
-mod listener;
-mod stream;
+mod tcp_listener;
+mod tcp_stream;
