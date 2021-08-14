@@ -24,7 +24,7 @@ pub struct TcpListener {
 }
 
 impl TcpListener {
-    pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+    pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let std_listener = StdTcpListener::bind(addr)?;
 
         Ok(Self { std_listener })
@@ -187,7 +187,7 @@ mod tests {
             .build()
             .expect("build runtime failed")
             .block_on(async {
-                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
 
                 dbg!(addr);
@@ -200,7 +200,7 @@ mod tests {
             .build()
             .expect("build runtime failed")
             .block_on(async {
-                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
 
                 dbg!(addr);
@@ -224,7 +224,7 @@ mod tests {
             .build()
             .expect("build runtime failed")
             .block_on(async {
-                let listener = TcpListener::bind("[::1]:0").unwrap();
+                let listener = TcpListener::bind("[::1]:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
 
                 dbg!(addr);
@@ -248,7 +248,7 @@ mod tests {
             .build()
             .expect("build runtime failed")
             .block_on(async {
-                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
                 let mut incoming = listener.incoming();
 
