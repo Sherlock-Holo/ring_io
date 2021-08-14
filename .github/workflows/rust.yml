@@ -52,13 +52,16 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-#          args: -- -D warnings
-  
+          args: -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
 
     steps:
+      - name: Show kernel version
+        run: uname -a
+
       - uses: actions/checkout@v2
       - name: Build
         run: cargo build --verbose
