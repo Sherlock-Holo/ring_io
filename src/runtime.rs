@@ -25,7 +25,7 @@ use crate::driver::{Callback, Driver, DRIVER};
 thread_local! {
     static TASK_SENDER: RefCell<Option<Sender<Runnable>>> = RefCell::new(None);
     static TASK_RECEIVER: RefCell<Option<Receiver<Runnable>>> = RefCell::new(None);
-    static PARKING: RefCell<Option<Arc<AtomicBool>>> = RefCell::new(None);
+    static PARKER: RefCell<Option<Parker >> = RefCell::new(None);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,9 +79,10 @@ impl Runtime {
     {
         const MAX_RUN_TASK_COUNT: u8 = 64;
 
+        let parker = self.init_parking();
+
         self.init_driver();
         self.init_task_sender_and_receiver();
-        let park = self.init_parking();
 
         let (sender, receiver) = crossbeam_channel::bounded(1);
 
@@ -136,7 +137,7 @@ impl Runtime {
                         .unwrap_or_else(|err| panic!("try push all wait sqes failed: {}", err));
 
                     if driver.wait_for_push_wakers.is_empty() && no_task && pushed == 0 {
-                        park.store(true, Ordering::Release);
+                        parker.ready_to_park();
 
                         // block until at least 1 cqe is available, or the blocking task finish and
                         // push a Nop sqe so a Nop cqe is available
@@ -307,16 +308,20 @@ impl Runtime {
             .is_some()
     }
 
-    fn init_parking(&self) -> Arc<AtomicBool> {
-        let park = Arc::new(AtomicBool::new(false));
+    fn init_parking(&self) -> Parker {
+        let parker = Parker {
+            sq: self.driver.as_ref().unwrap().sq.clone(),
+            submitter: self.driver.as_ref().unwrap().submitter.clone(),
+            parking: Arc::new(AtomicBool::new(false)),
+        };
 
-        PARKING.with(|parking| {
+        PARKER.with(|parking| {
             let mut parking = parking.borrow_mut();
 
-            parking.replace(park.clone());
+            parking.replace(parker.clone());
         });
 
-        park
+        parker
     }
 }
 
@@ -334,40 +339,32 @@ impl Drop for Runtime {
             driver.borrow_mut().take();
         });
 
-        PARKING.with(|parking| {
-            parking.borrow_mut().take();
+        PARKER.with(|parker| {
+            parker.borrow_mut().take();
         })
     }
 }
 
-struct Unpark {
+#[derive(Clone)]
+struct Parker {
     sq: Arc<Mutex<SubmissionUring>>,
     submitter: SubmitterUring,
     parking: Arc<AtomicBool>,
 }
 
-impl Unpark {
+impl Parker {
     fn new() -> Self {
-        let (sq, submitter) = DRIVER.with(|driver| {
-            let driver = driver.borrow();
-            let driver = driver.as_ref().expect("Driver is not created");
-
-            (driver.sq.clone(), driver.submitter.clone())
-        });
-
-        let parking = PARKING.with(|parking| {
-            parking
-                .borrow_mut()
+        PARKER.with(|parker| {
+            parker
+                .borrow()
                 .as_ref()
-                .expect("PARKING is not created")
+                .expect("Parker is not created")
                 .clone()
-        });
+        })
+    }
 
-        Self {
-            sq,
-            submitter,
-            parking,
-        }
+    fn ready_to_park(&self) {
+        self.parking.store(true, Ordering::Release);
     }
 
     fn unpark(&self) -> Result<(), Error> {
@@ -452,12 +449,12 @@ where
         task_sender.as_mut().expect("task sender not init").clone()
     });
 
-    let unpark = Unpark::new();
+    let parker = Parker::new();
 
     let schedule = move |runnable| {
         task_sender.send(runnable).unwrap();
 
-        unpark.unpark().unwrap();
+        parker.unpark().unwrap();
     };
 
     let (runnable, task) = async_task::spawn(fut, schedule);
@@ -484,6 +481,8 @@ where
         task_sender.clone()
     });
 
+    let main_thread_parker = Parker::new();
+
     let waker = Arc::new(AtomicWaker::new());
 
     {
@@ -494,6 +493,13 @@ where
                 let mut task_sender = task_sender.borrow_mut();
                 if task_sender.is_none() {
                     task_sender.replace(main_thread_task_sender);
+                }
+            });
+
+            PARKER.with(|parker| {
+                let mut parker = parker.borrow_mut();
+                if parker.is_none() {
+                    parker.replace(main_thread_parker);
                 }
             });
 
@@ -510,6 +516,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use futures_channel::oneshot;
+
     use super::*;
 
     #[test]
@@ -605,6 +613,27 @@ mod tests {
             .expect("build runtime failed")
             .block_on(async {
                 futures_timer::Delay::new(Duration::from_secs(1)).await;
+            })
+    }
+
+    #[test]
+    fn spawn_in_spawn_blocking() {
+        Runtime::builder()
+            .build()
+            .expect("build runtime failed")
+            .block_on(async {
+                let (tx, rx) = oneshot::channel();
+
+                spawn_blocking(|| {
+                    spawn(async move {
+                        tx.send(1).unwrap();
+                    })
+                    .detach();
+                })
+                .detach();
+
+                let n = rx.await.unwrap();
+                assert_eq!(n, 1);
             })
     }
 }
