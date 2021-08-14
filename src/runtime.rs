@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::io::Error;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::thread;
@@ -12,7 +13,10 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use futures_util::task::AtomicWaker;
 use futures_util::FutureExt;
 use io_uring::cqueue::buffer_select;
+use io_uring::opcode::Nop;
+use io_uring::ownedsplit::{SubmissionUring, SubmitterUring};
 use nix::unistd;
+use parking_lot::Mutex;
 
 use crate::buffer::GroupBufferRegisterState;
 use crate::cqe_ext::EntryExt;
@@ -21,6 +25,7 @@ use crate::driver::{Callback, Driver, DRIVER};
 thread_local! {
     static TASK_SENDER: RefCell<Option<Sender<Runnable>>> = RefCell::new(None);
     static TASK_RECEIVER: RefCell<Option<Receiver<Runnable>>> = RefCell::new(None);
+    static PARKING: RefCell<Option<Arc<AtomicBool>>> = RefCell::new(None);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +81,7 @@ impl Runtime {
 
         self.init_driver();
         self.init_task_sender_and_receiver();
+        let park = self.init_parking();
 
         let (sender, receiver) = crossbeam_channel::bounded(1);
 
@@ -92,7 +98,7 @@ impl Runtime {
             }
 
             // if no task can run, it may need yield this thread
-            let need_yield = TASK_RECEIVER.with(|task_receiver| {
+            let no_task = TASK_RECEIVER.with(|task_receiver| {
                 let mut task_receiver = task_receiver.borrow_mut();
                 let task_receiver = task_receiver.as_mut().unwrap();
 
@@ -115,31 +121,43 @@ impl Runtime {
                 false
             });
 
-            let empty_cq_and_no_wait_wakers = DRIVER.with(|driver| {
+            DRIVER.with(|driver| {
                 let mut driver = driver.borrow_mut();
                 let driver = driver.as_mut().unwrap();
 
-                let cq = driver.ring.completion();
+                let cq = driver.cq.completion();
 
-                if cq.is_empty() {
+                let cq: Vec<_> = if cq.is_empty() {
                     // let driver.try_run_all_wait_sqes works
                     drop(cq);
 
-                    driver.try_run_all_wait_sqes();
+                    let pushed = driver
+                        .try_push_all_wait_sqes()
+                        .unwrap_or_else(|err| panic!("try push all wait sqes failed: {}", err));
 
-                    if driver.wait_for_push_wakers.is_empty() {
-                        return true;
+                    if driver.wait_for_push_wakers.is_empty() && no_task && pushed == 0 {
+                        park.store(true, Ordering::Release);
+
+                        // block until at least 1 cqe is available, or the blocking task finish and
+                        // push a Nop sqe so a Nop cqe is available
+                        driver
+                            .submitter
+                            .submitter()
+                            .submit_and_wait(1)
+                            .unwrap_or_else(|err| panic!("submit_and_wait failed: {}", err));
+
+                        driver.cq.completion().collect()
+                    } else {
+                        for waker in driver.wait_for_push_wakers.drain(..) {
+                            waker.wake();
+                        }
+
+                        // cq is empty, but there are some tasks can be run
+                        return;
                     }
-
-                    for waker in driver.wait_for_push_wakers.drain(..) {
-                        waker.wake();
-                    }
-
-                    return false;
-                }
-
-                // if we don't collect to a Vec, we can't use the driver again
-                let cq = cq.collect::<Vec<_>>();
+                } else {
+                    cq.collect()
+                };
 
                 for cqe in cq {
                     let user_data = cqe.user_data();
@@ -251,14 +269,10 @@ impl Runtime {
                 }
 
                 // try to push all background sqes
-                driver.try_run_all_wait_sqes();
-
-                false
+                driver
+                    .try_push_all_wait_sqes()
+                    .unwrap_or_else(|err| panic!("try push all wait sqes failed: {}", err));
             });
-
-            if need_yield && empty_cq_and_no_wait_wakers {
-                thread::yield_now();
-            }
         }
     }
 
@@ -270,7 +284,7 @@ impl Runtime {
         })
     }
 
-    fn init_task_sender_and_receiver(&mut self) -> bool {
+    fn init_task_sender_and_receiver(&self) -> bool {
         let (sender, receiver) = crossbeam_channel::unbounded();
 
         TASK_SENDER
@@ -292,6 +306,18 @@ impl Runtime {
             })
             .is_some()
     }
+
+    fn init_parking(&self) -> Arc<AtomicBool> {
+        let park = Arc::new(AtomicBool::new(false));
+
+        PARKING.with(|parking| {
+            let mut parking = parking.borrow_mut();
+
+            parking.replace(park.clone());
+        });
+
+        park
+    }
 }
 
 impl Drop for Runtime {
@@ -307,6 +333,61 @@ impl Drop for Runtime {
         DRIVER.with(|driver| {
             driver.borrow_mut().take();
         });
+
+        PARKING.with(|parking| {
+            parking.borrow_mut().take();
+        })
+    }
+}
+
+struct Unpark {
+    sq: Arc<Mutex<SubmissionUring>>,
+    submitter: SubmitterUring,
+    parking: Arc<AtomicBool>,
+}
+
+impl Unpark {
+    fn new() -> Self {
+        let (sq, submitter) = DRIVER.with(|driver| {
+            let driver = driver.borrow();
+            let driver = driver.as_ref().expect("Driver is not created");
+
+            (driver.sq.clone(), driver.submitter.clone())
+        });
+
+        let parking = PARKING.with(|parking| {
+            parking
+                .borrow_mut()
+                .as_ref()
+                .expect("PARKING is not created")
+                .clone()
+        });
+
+        Self {
+            sq,
+            submitter,
+            parking,
+        }
+    }
+
+    fn unpark(&self) -> Result<(), Error> {
+        if self
+            .parking
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            unsafe {
+                self.sq
+                    .lock()
+                    .submission()
+                    .push(&Nop::new().build())
+                    .expect("push Nop to sq failed");
+            }
+
+            self.submitter.submitter().submit()?;
+        }
+
+        Ok(())
     }
 }
 
@@ -371,8 +452,12 @@ where
         task_sender.as_mut().expect("task sender not init").clone()
     });
 
+    let unpark = Unpark::new();
+
     let schedule = move |runnable| {
         task_sender.send(runnable).unwrap();
+
+        unpark.unpark().unwrap();
     };
 
     let (runnable, task) = async_task::spawn(fut, schedule);

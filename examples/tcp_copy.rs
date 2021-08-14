@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let target_addr = args.next().unwrap();
 
     Runtime::builder()
+        // .sq_poll(Duration::from_secs(1))
         .build()
         .expect("build runtime failed")
         .block_on(async move {

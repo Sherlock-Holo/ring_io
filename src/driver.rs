@@ -4,15 +4,18 @@ use std::ffi::CString;
 use std::io::Result;
 use std::mem::MaybeUninit;
 use std::os::unix::io::RawFd;
+use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
 use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
+use io_uring::ownedsplit::{CompletionUring, SubmissionUring, SubmitterUring};
 use io_uring::squeue::Entry as SqEntry;
 use io_uring::types::Timespec;
 use io_uring::{IoUring, Probe};
 use nix::sys::socket::SockAddr;
+use parking_lot::Mutex;
 
 use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
 
@@ -67,9 +70,11 @@ pub enum Callback {
 }
 
 pub struct Driver {
-    pub ring: IoUring,
+    pub sq: Arc<Mutex<SubmissionUring>>,
+    pub submitter: SubmitterUring,
+    pub cq: CompletionUring,
 
-    pub next_user_data: u64,
+    next_user_data: u64,
 
     /// when sq is full, store the waker, after consume cqe, wake all of them
     pub wait_for_push_wakers: VecDeque<Waker>,
@@ -80,7 +85,7 @@ pub struct Driver {
 
     pub callbacks: HashMap<u64, Callback>,
 
-    pub background_sqes: VecDeque<SqEntry>,
+    background_sqes: VecDeque<SqEntry>,
 }
 
 impl Driver {
@@ -111,8 +116,12 @@ impl Driver {
             panic!("The kernel doesn't support io_uring fast_poll");
         }
 
+        let (submitter, sq, cq) = ring.owned_split();
+
         Ok(Self {
-            ring,
+            sq: Arc::new(Mutex::new(sq)),
+            submitter,
+            cq,
             next_user_data: 1,
             wait_for_push_wakers: Default::default(),
             buffer_manager: BufferManager::new(),
@@ -156,18 +165,23 @@ impl Driver {
         .build()
         .user_data(user_data);
 
+        let mut sq = self.sq.lock();
+
         // register the group buffer
         unsafe {
-            if self.ring.submission().push(&provide_buffer_sqe).is_err() {
-                self.ring.submit()?;
+            if sq.submission().push(&provide_buffer_sqe).is_err() {
+                self.submitter.submitter().submit()?;
 
-                if self.ring.submission().push(&provide_buffer_sqe).is_err() {
+                if sq.submission().push(&provide_buffer_sqe).is_err() {
                     return Ok(None);
                 }
             }
-
-            self.ring.submit()?;
         }
+
+        // release mutex ASAP
+        drop(sq);
+
+        self.submitter.submitter().submit()?;
 
         self.callbacks.insert(
             user_data,
@@ -254,24 +268,29 @@ impl Driver {
 
         sqe = sqe.user_data(user_data);
 
+        let mut sq = self.sq.lock();
+
         unsafe {
-            if self.ring.submission().push(&sqe).is_err() {
-                self.ring.submit()?;
+            if sq.submission().push(&sqe).is_err() {
+                self.submitter.submitter().submit()?;
 
                 // sq is still full, push in next times
-                if self.ring.submission().push(&sqe).is_err() {
+                if sq.submission().push(&sqe).is_err() {
                     self.wait_for_push_wakers.push_back(waker);
 
                     return Ok(None);
                 }
             }
-
-            self.callbacks.insert(user_data, Callback::Wakeup { waker });
-
-            self.ring.submit()?;
-
-            Ok(Some(user_data))
         }
+
+        // release mutex ASAP
+        drop(sq);
+
+        self.callbacks.insert(user_data, Callback::Wakeup { waker });
+
+        self.submitter.submitter().submit()?;
+
+        Ok(Some(user_data))
     }
 
     /*pub fn push_sqes_with_waker(
@@ -318,36 +337,24 @@ impl Driver {
         }
     }*/
 
-    pub fn push_sqe(&mut self, sqe: &SqEntry) -> Result<bool> {
-        unsafe {
-            if self.ring.submission().push(sqe).is_err() {
-                self.ring.submit()?;
-
-                // sq is still full, push in next times
-                if self.ring.submission().push(sqe).is_err() {
-                    return Ok(false);
-                }
-            }
-
-            self.ring.submit()?;
-
-            Ok(true)
-        }
-    }
-
     /// cancel a event without any callback
     pub fn cancel_normal(&mut self, user_data: u64) -> Result<()> {
         let cancel_sqe = AsyncCancel::new(user_data).build();
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         self.callbacks.remove(&user_data);
 
@@ -364,15 +371,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelRead
         self.callbacks
@@ -391,15 +403,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelConnect
         self.callbacks
@@ -418,15 +435,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelOpenAt
         self.callbacks
@@ -450,15 +472,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelStatx
         self.callbacks
@@ -482,15 +509,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelStatx
         self.callbacks
@@ -509,15 +541,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelStatx
         self.callbacks
@@ -536,15 +573,20 @@ impl Driver {
             .build()
             .user_data(background_user_data);
 
-        unsafe {
-            if self.ring.submission().push(&cancel_sqe).is_err() {
-                self.ring.submit()?;
+        let mut sq = self.sq.lock();
 
-                if self.ring.submission().push(&cancel_sqe).is_err() {
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.push_back(cancel_sqe);
                 }
             }
         }
+
+        // release mutex ASAP
+        drop(sq);
 
         // change the callback to CancelTimeout
         self.callbacks
@@ -578,19 +620,34 @@ impl Driver {
         self.callbacks.remove(&user_data)
     }
 
-    pub fn try_run_all_wait_sqes(&mut self) {
-        self.background_sqes
-            .drain(..)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .for_each(|sqe| {
-                if !self
-                    .push_sqe(&sqe)
-                    .unwrap_or_else(|err| panic!("push sqe failed: {}", err))
-                {
-                    self.background_sqes.push_back(sqe);
+    pub fn try_push_all_wait_sqes(&mut self) -> Result<usize> {
+        let mut pushed = 0;
+
+        let mut sq = self.sq.lock();
+
+        while let Some(sqe) = self.background_sqes.pop_front() {
+            unsafe {
+                if sq.submission().push(&sqe).is_err() {
+                    self.submitter.submitter().submit()?;
+
+                    // sq is still full, push in next times
+                    if sq.submission().push(&sqe).is_err() {
+                        self.background_sqes.push_front(sqe);
+
+                        return Ok(pushed);
+                    }
                 }
-            });
+
+                pushed += 1;
+            }
+        }
+
+        // release mutex ASAP
+        drop(sq);
+
+        self.submitter.submitter().submit()?;
+
+        Ok(pushed)
     }
 }
 
