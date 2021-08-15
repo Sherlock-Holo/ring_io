@@ -174,12 +174,12 @@ mod tests {
             .build()
             .expect("build runtime failed")
             .block_on(async {
-                let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+                let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
                 let addr = listener.local_addr().unwrap();
 
                 let task = spawn(async move { TcpStream::connect(addr).await.unwrap() });
 
-                let accept_stream = listener.accept().await.unwrap();
+                let (accept_stream, _) = listener.accept().await.unwrap();
                 let mut conn_stream = task.await;
 
                 let file = File::open("testdata/book.txt").await.unwrap();

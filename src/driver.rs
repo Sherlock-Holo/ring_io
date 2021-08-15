@@ -67,6 +67,13 @@ pub enum Callback {
     CancelTimeout {
         timespec: Box<Timespec>,
     },
+
+    // save the peer_addr and addr_size in Box so no matter how to move the peer_addr or addr_size,
+    // won't break the pointer that in the io_uring
+    CancelAccept {
+        peer_addr: Box<libc::sockaddr_storage>,
+        addr_size: Box<libc::socklen_t>,
+    },
 }
 
 pub struct Driver {
@@ -591,6 +598,48 @@ impl Driver {
         // change the callback to CancelTimeout
         self.callbacks
             .insert(user_data, Callback::CancelTimeout { timespec });
+
+        Ok(())
+    }
+
+    /// cancel the accept event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub fn cancel_accept(
+        &mut self,
+        user_data: u64,
+        peer_addr: Box<libc::sockaddr_storage>,
+        addr_size: Box<libc::socklen_t>,
+    ) -> Result<()> {
+        let background_user_data = self.next_user_data;
+        self.next_user_data += 1;
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        let mut sq = self.sq.lock();
+
+        unsafe {
+            if sq.submission().push(&cancel_sqe).is_err() {
+                self.submitter.submitter().submit()?;
+
+                if sq.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.push_back(cancel_sqe);
+                }
+            }
+        }
+
+        // release mutex ASAP
+        drop(sq);
+
+        // change the callback to CancelConnect
+        self.callbacks.insert(
+            user_data,
+            Callback::CancelAccept {
+                peer_addr,
+                addr_size,
+            },
+        );
 
         Ok(())
     }

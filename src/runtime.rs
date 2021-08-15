@@ -202,7 +202,8 @@ impl Runtime {
                                 | Callback::CancelStatx { .. }
                                 | Callback::CancelRenameAt { .. }
                                 | Callback::CancelUnlinkAt { .. }
-                                | Callback::CancelTimeout { .. } => {}
+                                | Callback::CancelTimeout { .. }
+                                | Callback::CancelAccept { .. } => {}
                             }
 
                             continue;
@@ -259,7 +260,8 @@ impl Runtime {
                             | Callback::CancelStatx { .. }
                             | Callback::CancelRenameAt { .. }
                             | Callback::CancelUnlinkAt { .. }
-                            | Callback::CancelTimeout { .. } => {}
+                            | Callback::CancelTimeout { .. }
+                            | Callback::CancelAccept { .. } => {}
                         }
                     }
                 }

@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()
         .expect("build runtime failed")
         .block_on(async move {
-            let listener = TcpListener::bind(listen_addr)?;
+            let listener = TcpListener::bind(listen_addr).await?;
             let mut incoming = listener.incoming();
 
             while let Some(stream) = incoming.next().await {
