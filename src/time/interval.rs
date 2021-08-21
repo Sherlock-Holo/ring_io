@@ -18,7 +18,7 @@ pub fn interval(period: Duration) -> Interval {
     }
 }
 
-#[must_use = "futures do nothing unless you `.next().await` or poll them"]
+#[must_use = "Future do nothing unless you `.next().await` or poll them"]
 #[derive(Debug)]
 pub struct Interval {
     period: Duration,

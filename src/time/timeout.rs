@@ -23,7 +23,7 @@ pub fn timeout_at<F>(deadline: Instant, fut: F) -> Timeout<F> {
 }
 
 pin_project! {
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
+    #[must_use = "Future do nothing unless you `.await` or poll them"]
     #[derive(Debug)]
     pub struct Timeout<F> {
         sleep: Sleep,

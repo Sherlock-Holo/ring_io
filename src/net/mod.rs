@@ -1,5 +1,5 @@
 pub use shutdown::Shutdown;
-pub use tcp::{TcpListener, TcpStream};
+pub use tcp::{Accept, Incoming, TcpListener, TcpStream};
 
 mod peek;
 mod shutdown;

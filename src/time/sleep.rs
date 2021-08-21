@@ -24,7 +24,7 @@ pub fn sleep_until(deadline: Instant) -> Sleep {
     sleep(duration)
 }
 
-#[must_use = "futures do nothing unless you `.await` or poll them"]
+#[must_use = "Future do nothing unless you `.await` or poll them"]
 #[derive(Debug)]
 pub struct Sleep {
     timespec: Option<Box<Timespec>>,

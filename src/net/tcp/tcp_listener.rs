@@ -17,6 +17,43 @@ use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 use crate::net::tcp::tcp_stream::TcpStream;
 
+/// A TCP socket server, listening for connections.
+///
+/// You can accept a new connection by using the [`accept`](`TcpListener::accept`)
+/// method.
+///
+/// An `Incoming` can be get by `listener.incoming()` with [`incoming`](`TcpListener::incoming`).
+///
+/// # Errors
+///
+/// Note that accepting a connection can lead to various errors and not all
+/// of them are necessarily fatal ‒ for example having too many open file
+/// descriptors or the other side closing the connection while it waits in
+/// an accept queue. These would terminate the stream if not handled in any
+/// way.
+///
+/// # Examples
+///
+/// Using `accept`:
+/// ```no_run
+/// use ring_io::net::TcpListener;
+///
+/// use std::io;
+///
+/// async fn process_socket<T>(socket: T) {
+///     # drop(socket);
+///     // do work with socket here
+/// }
+///
+/// async fn listen() -> io::Result<()> {
+///     let listener = TcpListener::bind("127.0.0.1:8080").await?;
+///
+///     loop {
+///         let (socket, _) = listener.accept().await?;
+///         process_socket(socket).await;
+///     }
+/// }
+/// ```
 #[derive(Debug)]
 pub struct TcpListener {
     // there is no need use io_uring close, normal close(2) is enough
@@ -24,14 +61,74 @@ pub struct TcpListener {
 }
 
 impl TcpListener {
+    /// Creates a new TcpListener, which will be bound to the specified address.
+    ///
+    /// The returned listener is ready for accepting connections.
+    ///
+    /// Binding with a port number of 0 will request that the OS assigns a port
+    /// to this listener. The port allocated can be queried via the
+    /// [`local_addr`](`TcpListener::local_addr`) method.
+    ///
+    /// The address type can be any implementor of the
+    /// [`ToSocketAddrs`](`std::net::ToSocketAddrs`) trait. If `addr` yields multiple
+    /// addresses, bind will be attempted with each of the addresses until one succeeds and returns
+    /// the listener. If none of the addresses succeed in creating a listener, the error returned
+    /// from the last attempt (the last address) is returned.
+    ///
+    /// This function sets the `SO_REUSEADDR` option on the socket.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ring_io::net::TcpListener;
+    /// # use ring_io::runtime::Runtime;
+    ///
+    /// use std::io;
+    ///
+    /// # fn main() -> io::Result<()> {
+    /// # Runtime::builder().build()?.block_on(async {
+    /// let listener = TcpListener::bind("127.0.0.1:0").await?;
+    ///
+    /// // use the listener
+    ///
+    /// let _ = listener;
+    ///
+    /// # Ok(())
+    /// # })
+    /// # }
+    /// ```
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let std_listener = StdTcpListener::bind(addr)?;
 
         Ok(Self { std_listener })
     }
 
+    /// Accepts a new incoming connection from this listener.
+    ///
+    /// This function will return a future [`Accept`], which will return a new TCP connection is
+    /// established. When established, the corresponding [`TcpStream`] and the remote peer's
+    /// address will be returned.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ring_io::net::TcpListener;
+    /// # use ring_io::runtime::Runtime;
+    ///
+    /// use std::io;
+    ///
+    /// # fn main() -> io::Result<()> {
+    /// # Runtime::builder().build()?.block_on(async {
+    /// let listener = TcpListener::bind("127.0.0.1:0").await?;
+    ///
+    /// let (_stream, _peer_addr) = listener.accept().await?;
+    ///
+    /// # Ok(())
+    /// # })
+    /// # }
+    /// ```
     pub fn accept(&self) -> Accept {
-        // Safey: we use the value after accept success
+        // Safety: we use the value after accept success
         let peer_addr: Box<libc::sockaddr_storage> = unsafe { Box::new(mem::zeroed()) };
         let addr_size = Box::new(mem::size_of_val(&*peer_addr) as _);
 
@@ -43,6 +140,37 @@ impl TcpListener {
         }
     }
 
+    /// Returns a Stream over the connections being received on this listener.
+    ///
+    /// The returned Stream will never return [`None`] and will also not yield
+    /// the peer's [`SocketAddr`] structure. poll over it is equivalent to
+    /// calling [`accept`](`TcpListener::accept`) in a loop.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ring_io::net::TcpListener;
+    /// # use ring_io::runtime::Runtime;
+    /// use futures_util::StreamExt;
+    ///
+    /// use std::io;
+    ///
+    /// # fn main() -> io::Result<()> {
+    /// Runtime::builder().build()?.block_on(async {
+    /// let mut incoming = TcpListener::bind("127.0.0.1:0").await?.incoming();
+    ///
+    /// while let Some(stream) = incoming.next().await {
+    ///     let stream = stream?;
+    ///
+    ///     // use the stream
+    ///
+    ///     let _ = stream;
+    /// }
+    ///
+    /// # Ok(())
+    /// # })
+    /// # }
+    /// ```
     pub fn incoming(&self) -> Incoming {
         Incoming {
             listener: self,
@@ -50,6 +178,34 @@ impl TcpListener {
         }
     }
 
+    /// Returns the local address that this listener is bound to.
+    ///
+    /// This can be useful, for example, when binding to port 0 to figure out
+    /// which port was actually bound.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ring_io::net::TcpListener;
+    /// # use ring_io::runtime::Runtime;
+    /// use futures_util::StreamExt;
+    ///
+    /// use std::io;
+    /// use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+    ///
+    /// # fn main() -> io::Result<()> {
+    /// Runtime::builder().build()?.block_on(async {
+    /// let mut listener = TcpListener::bind("127.0.0.1:8080").await?;
+    ///
+    /// assert_eq!(
+    ///     listener.local_addr()?,
+    ///     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080))
+    /// );
+    ///
+    /// # Ok(())
+    /// # })
+    /// # }
+    /// ```
     pub fn local_addr(&self) -> Result<SocketAddr> {
         let addr = socket::getsockname(self.std_listener.as_raw_fd())?;
         if let SockAddr::Inet(addr) = addr {
@@ -72,6 +228,18 @@ impl IntoRawFd for TcpListener {
     }
 }
 
+/// A future return a ([`TcpStream`], [`SocketAddr`]).
+///
+/// This future is created by [`accept`](`TcpListener::accept`).
+///
+/// # Cancel unsafety
+///
+/// This future is not cancel safe. If the future is used as the event in a
+/// [`select!`](https://docs.rs/futures/0.3/futures/macro.select.html) statement and some other
+/// branch completes first, then it is no guaranteed that no new connections were accepted by this
+/// future, but if a new connection is accepted and the future is canceled, the connection will be
+/// closed.
+#[must_use = "Future do nothing unless you `.await` or poll them"]
 #[derive(Debug)]
 pub struct Accept<'a> {
     listener: &'a TcpListener,
@@ -169,7 +337,7 @@ fn libc_sockaddr_to_socket_addr(
         libc::AF_INET => {
             assert!(len as usize >= mem::size_of::<libc::sockaddr_in>());
 
-            // Safety: storage is v4 addr and libc::sockaddr_in and nix::sys::socket::sockaddr_in
+            // Safety: storage is a v4 addr and libc::sockaddr_in and nix::sys::socket::sockaddr_in
             // have the same layout
             let sockaddr_in = unsafe {
                 *(storage as *const _ as *const libc::sockaddr_in
@@ -181,8 +349,8 @@ fn libc_sockaddr_to_socket_addr(
         libc::AF_INET6 => {
             assert!(len as usize >= mem::size_of::<libc::sockaddr_in6>());
 
-            // Safety: storage is v6 addr and libc::sockaddr_in6 and nix::sys::socket::sockaddr_in6
-            // have the same layout
+            // Safety: storage is a v6 addr and libc::sockaddr_in6 and
+            // nix::sys::socket::sockaddr_in6 have the same layout
             let sockaddr_in6 = unsafe {
                 *(storage as *const _ as *const libc::sockaddr_in6
                     as *const nix::sys::socket::sockaddr_in6)
@@ -194,6 +362,15 @@ fn libc_sockaddr_to_socket_addr(
     }
 }
 
+/// A Stream over the connections being received on this listener.
+///
+/// The Stream is created by [`incoming`](`TcpListener::incoming`).
+///
+/// The Stream will never return [`None`] and will also not yield the peer's [`SocketAddr`]
+/// structure. Poll over it is equivalent to calling [`accept`](`TcpListener::accept`) in a loop.
+///
+/// This type is an async version of [`std::net::Incoming`].
+#[must_use = "Stream do nothing unless you `.await` or poll them"]
 #[derive(Debug)]
 pub struct Incoming<'a> {
     listener: &'a TcpListener,

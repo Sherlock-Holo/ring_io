@@ -255,13 +255,25 @@ impl Runtime {
                                 let _ = unistd::close(fd);
                             }
 
+                            Callback::CancelAccept { .. } => {
+                                // a stream is accepted
+                                if cqe.result() > 0 {
+                                    let _ = unistd::close(cqe.result());
+                                }
+                            }
+
+                            Callback::CancelOpenAt { .. } => {
+                                // a file is opened
+                                if cqe.result() > 0 {
+                                    let _ = unistd::close(cqe.result());
+                                }
+                            }
+
                             // no need to do
-                            Callback::CancelOpenAt { .. }
-                            | Callback::CancelStatx { .. }
+                            Callback::CancelStatx { .. }
                             | Callback::CancelRenameAt { .. }
                             | Callback::CancelUnlinkAt { .. }
-                            | Callback::CancelTimeout { .. }
-                            | Callback::CancelAccept { .. } => {}
+                            | Callback::CancelTimeout { .. } => {}
                         }
                     }
                 }
