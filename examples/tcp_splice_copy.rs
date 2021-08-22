@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::os::unix::io::AsRawFd;
 
 use futures_util::StreamExt;
 use ring_io::io::Splice;
@@ -41,13 +42,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let task1 = spawn(async move {
                         let mut splice = Splice::new()?;
 
-                        splice.copy(ls1, ts2).await
+                        splice.copy(ls1.as_raw_fd(), ts2.as_raw_fd()).await?;
+
+                        ts2.shutdown().await
                     });
 
                     let task2 = spawn(async move {
                         let mut splice = Splice::new()?;
 
-                        splice.copy(ts1, ls2).await
+                        splice.copy(ts1.as_raw_fd(), ls2.as_raw_fd()).await?;
+
+                        ls2.shutdown().await
                     });
 
                     futures_util::future::try_join(task1, task2)

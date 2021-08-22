@@ -396,6 +396,12 @@ impl Future for BufRead {
     type Output = Result<Buffer>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        enum ReadBufferState {
+            None,
+            Buffer(Buffer),
+            ErrNoBuf,
+        }
+
         match (self.group_id, self.user_data) {
             (Some(group_id), Some(user_data)) => {
                 let buffer = DRIVER.with(|driver| {
@@ -403,12 +409,19 @@ impl Future for BufRead {
                     let driver = driver.as_mut().expect("Driver is not running");
 
                     match driver.take_cqe_with_waker(user_data, cx.waker()) {
-                        None => Ok(None),
+                        None => Ok(ReadBufferState::None),
                         Some(cqe) => {
                             // although read is error, we also need to check if buffer is used or not
                             if cqe.is_err() {
                                 if let Some(buffer_id) = buffer_select(cqe.flags()) {
                                     driver.give_back_buffer_with_id(group_id, buffer_id);
+                                }
+
+                                if cqe.result() == -libc::ENOBUFS {
+                                    // we use a no available buffer group buffer, that's so strange
+                                    // but we can retry to avoid read failed
+
+                                    return Ok(ReadBufferState::ErrNoBuf);
                                 }
 
                                 return Err(Error::from_raw_os_error(-cqe.result()));
@@ -417,7 +430,7 @@ impl Future for BufRead {
                             let buffer_id =
                                 buffer_select(cqe.flags()).expect("read success but no buffer id");
 
-                            Ok(Some(driver.take_buffer(
+                            Ok(ReadBufferState::Buffer(driver.take_buffer(
                                 self.want_buf_size,
                                 group_id,
                                 buffer_id,
@@ -428,8 +441,8 @@ impl Future for BufRead {
                 })?;
 
                 match buffer {
-                    None => Poll::Pending,
-                    Some(buffer) => {
+                    ReadBufferState::None => Poll::Pending,
+                    ReadBufferState::Buffer(buffer) => {
                         // drop won't send useless cancel
                         self.user_data.take();
 
@@ -438,6 +451,7 @@ impl Future for BufRead {
 
                         Poll::Ready(Ok(buffer))
                     }
+                    ReadBufferState::ErrNoBuf => self.poll(cx),
                 }
             }
 

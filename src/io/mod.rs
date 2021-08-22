@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io::{IoSlice, IoSliceMut};
 use std::marker::PhantomData;
+use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub use stdio::stdin::{stdin, Stdin, StdinGuard};
 pub use stdio::stdout_and_stderr::{stderr, stdout, Stderr, StderrGuard, Stdout, StdoutGuard};
 
 use crate::io::ring_fd::RingFd;
+use crate::net::ShutdownFuture;
 
 pub mod ring_fd;
 mod splice;
@@ -27,6 +29,10 @@ pub struct ReadHalf<'a> {
 impl<'a> ReadHalf<'a> {
     pub(crate) fn new(ring_fd: &'a mut RingFd) -> Self {
         Self { ring_fd }
+    }
+
+    pub fn shutdown(&self) -> ShutdownFuture {
+        ShutdownFuture::new(self.ring_fd, Shutdown::Read)
     }
 }
 
@@ -71,6 +77,10 @@ pub struct WriteHalf<'a> {
 impl<'a> WriteHalf<'a> {
     pub(crate) fn new(ring_fd: &'a mut RingFd) -> Self {
         Self { ring_fd }
+    }
+
+    pub fn shutdown(&self) -> ShutdownFuture {
+        ShutdownFuture::new(self.ring_fd, Shutdown::Write)
     }
 }
 
@@ -135,6 +145,13 @@ impl<T> OwnedReadHalf<T> {
             ring_fd,
             _phantom_data: Default::default(),
         }
+    }
+
+    pub fn shutdown(&self) -> ShutdownFuture {
+        // Safety: ring_fd is valid
+        let ring_fd = unsafe { &(*self.ring_fd.get()) };
+
+        ShutdownFuture::new(ring_fd, Shutdown::Read)
     }
 }
 
@@ -218,6 +235,13 @@ impl<T> OwnedWriteHalf<T> {
             ring_fd,
             _phantom_data: Default::default(),
         }
+    }
+
+    pub fn shutdown(&self) -> ShutdownFuture {
+        // Safety: ring_fd is valid
+        let ring_fd = unsafe { &(*self.ring_fd.get()) };
+
+        ShutdownFuture::new(ring_fd, Shutdown::Write)
     }
 }
 

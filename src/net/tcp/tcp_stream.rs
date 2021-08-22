@@ -21,7 +21,7 @@ use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 use crate::io::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::net::peek::Peek;
-use crate::net::shutdown::Shutdown;
+use crate::net::shutdown::ShutdownFuture;
 
 #[derive(Debug)]
 pub struct TcpStream(RingFd);
@@ -97,8 +97,8 @@ impl TcpStream {
         )
     }
 
-    pub fn shutdown(&self, how: HowShutdown) -> Shutdown {
-        Shutdown::new(&self.0, how)
+    pub fn shutdown(&self, how: HowShutdown) -> ShutdownFuture {
+        ShutdownFuture::new(&self.0, how)
     }
 
     pub async fn peek(&mut self, buf: &mut [u8]) -> Result<usize> {

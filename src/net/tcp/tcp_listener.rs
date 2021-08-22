@@ -157,7 +157,8 @@ impl TcpListener {
     ///
     /// # fn main() -> io::Result<()> {
     /// Runtime::builder().build()?.block_on(async {
-    /// let mut incoming = TcpListener::bind("127.0.0.1:0").await?.incoming();
+    /// let listener = TcpListener::bind("127.0.0.1:0").await?;
+    /// let mut incoming = listener.incoming();
     ///
     /// while let Some(stream) = incoming.next().await {
     ///     let stream = stream?;

@@ -1,4 +1,4 @@
-pub use shutdown::Shutdown;
+pub use shutdown::ShutdownFuture;
 pub use tcp::{Accept, Incoming, TcpListener, TcpStream};
 
 mod peek;

@@ -3,11 +3,9 @@ use std::fmt::{Debug, Formatter};
 use std::ops::{Deref, DerefMut};
 use std::{fmt, mem, ptr};
 
-use slab::Slab;
-
 const EVERY_GROUP_BUFFER_BUFFER_COUNT: usize = 10;
 
-type GroupIdGenerator = Slab<()>;
+type GroupIdGenerator = u16;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum GroupBufferRegisterState {
@@ -25,7 +23,7 @@ pub struct BufferManager {
 impl BufferManager {
     pub fn new() -> Self {
         Self {
-            group_id_gen: Default::default(),
+            group_id_gen: 1,
             group_buffers: Default::default(),
         }
     }
@@ -158,7 +156,8 @@ impl GroupBuffers {
             return unsafe { &mut (*group_buffer) };
         }
 
-        let new_group_id = group_id_gen.insert(()) as u16;
+        let new_group_id = *group_id_gen;
+        *group_id_gen += 1;
 
         let group_buffer = GroupBuffer::new(new_group_id, self.buffer_size);
 
@@ -225,8 +224,8 @@ impl GroupBuffer {
         // when take a buffer, there should be at least one buffer is available
         debug_assert!(self.available > 0);
 
-        self.on_fly -= 1;
-        self.available -= 1;
+        self.decrease_on_fly();
+        self.decrease_available();
 
         let start = (buffer_id - 1) as usize * self.every_buf_size;
         let end = start + self.every_buf_size;
@@ -256,10 +255,18 @@ impl GroupBuffer {
 
     pub fn increase_available(&mut self) {
         debug_assert!(
-            (self.low_level_buffer.len() / self.every_buf_size) > self.available as usize
+            (self.low_level_buffer.len() / self.every_buf_size) > self.available as usize,
+            "GroupBuffer {:?}",
+            self,
         );
 
         self.available += 1;
+    }
+
+    pub fn decrease_available(&mut self) {
+        debug_assert!(self.available > 0);
+
+        self.available -= 1;
     }
 
     pub fn register_state(&self) -> GroupBufferRegisterState {
@@ -272,7 +279,7 @@ impl GroupBuffer {
 
         self.available = (self.low_level_buffer.len() / self.every_buf_size) as _;
 
-        self.register_state = GroupBufferRegisterState::Registered;
+        self.set_register_state(GroupBufferRegisterState::Registered);
     }
 
     /// set a new register state and return old

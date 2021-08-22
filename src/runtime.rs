@@ -215,8 +215,9 @@ impl Runtime {
                             Callback::ProvideBuffer { group_id } => {
                                 if cqe.is_err() {
                                     panic!(
-                                        "unexpect error for ProvideBuffers {}, user_data {}",
+                                        "unexpect error for ProvideBuffers {}, group_id {}, user_data {}",
                                         Error::from_raw_os_error(-cqe.result()),
+                                        group_id,
                                         user_data
                                     );
                                 }
@@ -245,10 +246,9 @@ impl Runtime {
 
                             // an ready read event is canceled
                             Callback::CancelRead { group_id } => {
-                                let buffer_id =
-                                    buffer_select(cqe.flags()).expect("buffer id not found");
-
-                                driver.give_back_buffer_with_id(group_id, buffer_id);
+                                if let Some(buffer_id) = buffer_select(cqe.flags()) {
+                                    driver.give_back_buffer_with_id(group_id, buffer_id);
+                                }
                             }
 
                             Callback::CancelConnect { addr: _, fd } => {

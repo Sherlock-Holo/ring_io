@@ -13,13 +13,13 @@ use crate::driver::DRIVER;
 use crate::io::ring_fd::RingFd;
 
 #[derive(Debug)]
-pub struct Shutdown<'a> {
+pub struct ShutdownFuture<'a> {
     ring_fd: &'a RingFd,
     user_data: Option<u64>,
     how: HowShutdown,
 }
 
-impl<'a> Shutdown<'a> {
+impl<'a> ShutdownFuture<'a> {
     pub(crate) fn new(ring_fd: &'a RingFd, how: HowShutdown) -> Self {
         Self {
             ring_fd,
@@ -29,7 +29,7 @@ impl<'a> Shutdown<'a> {
     }
 }
 
-impl<'a> Future for Shutdown<'a> {
+impl<'a> Future for ShutdownFuture<'a> {
     type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -71,7 +71,7 @@ impl<'a> Future for Shutdown<'a> {
     }
 }
 
-impl<'a> Drop for Shutdown<'a> {
+impl<'a> Drop for ShutdownFuture<'a> {
     fn drop(&mut self) {
         if let Some(user_data) = self.user_data {
             DRIVER.with(|driver| {

@@ -248,6 +248,9 @@ impl Driver {
 
         group_buffer.decrease_on_fly();
 
+        // the buffer is selected, so decrease available
+        group_buffer.decrease_available();
+
         let ptr_mut = group_buffer.low_level_buffer_by_buffer_id(buffer_id);
         let len = group_buffer.every_buf_size();
 
@@ -299,50 +302,6 @@ impl Driver {
 
         Ok(Some(user_data))
     }
-
-    /*pub fn push_sqes_with_waker(
-        &mut self,
-        mut sqes: Vec<SqEntry>,
-        waker: Waker,
-    ) -> Result<Option<Vec<u64>>> {
-        let user_data = self.next_user_data;
-        self.next_user_data += sqes.len() as u64;
-
-        let mut user_data_list = Vec::with_capacity(sqes.len());
-        for i in 0..sqes.len() {
-            user_data_list.push(user_data + i as u64);
-        }
-
-        for (index, &user_data) in user_data_list.iter().enumerate() {
-            sqes[index] = sqes[index].clone().user_data(user_data);
-        }
-
-        unsafe {
-            if self.ring.submission().push_multiple(&sqes).is_err() {
-                self.ring.submit()?;
-
-                // sq is still full, push in next times
-                if self.ring.submission().push_multiple(&sqes).is_err() {
-                    self.wait_for_push_wakers.push_back(waker);
-
-                    return Ok(None);
-                }
-            }
-
-            for &user_data in user_data_list.iter() {
-                self.callbacks.insert(
-                    user_data,
-                    Callback::Wakeup {
-                        waker: waker.clone(),
-                    },
-                );
-            }
-
-            self.ring.submit()?;
-
-            Ok(Some(user_data_list))
-        }
-    }*/
 
     /// cancel a event without any callback
     pub fn cancel_normal(&mut self, user_data: u64) -> Result<()> {

@@ -35,12 +35,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     eprintln!("connected stream {:?}", target_stream);
 
-                    let (ls1, mut ls2) = listen_stream.into_split();
-                    let (ts1, mut ts2) = target_stream.into_split();
+                    let (mut ls1, mut ls2) = listen_stream.into_split();
+                    let (mut ts1, mut ts2) = target_stream.into_split();
 
-                    let task1 = spawn(async move { io::copy(ls1, &mut ts2).await });
+                    let task1 = spawn(async move {
+                        io::copy_buf(&mut ls1, &mut ts2).await?;
 
-                    let task2 = spawn(async move { io::copy(ts1, &mut ls2).await });
+                        ts2.shutdown().await
+                    });
+
+                    let task2 = spawn(async move {
+                        io::copy_buf(&mut ts1, &mut ls2).await?;
+
+                        ls2.shutdown().await
+                    });
 
                     futures_util::future::try_join(task1, task2)
                         .await
