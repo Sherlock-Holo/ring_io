@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
-use io_uring::ownedsplit::{CompletionUring, SubmissionUring, SubmitterUring};
 use io_uring::squeue::Entry as SqEntry;
 use io_uring::types::Timespec;
 use io_uring::{IoUring, Probe};
@@ -18,6 +17,7 @@ use nix::sys::socket::SockAddr;
 use parking_lot::Mutex;
 
 use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
+use crate::owned_ring::{CompletionUring, SplitRing, SubmissionUring, SubmitterUring};
 
 thread_local! {
     pub static DRIVER: RefCell<Option<Driver>> = RefCell::new(None);

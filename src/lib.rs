@@ -6,5 +6,6 @@ mod driver;
 pub mod fs;
 pub mod io;
 pub mod net;
+mod owned_ring;
 pub mod runtime;
 pub mod time;

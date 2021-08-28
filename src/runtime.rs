@@ -14,13 +14,13 @@ use futures_util::task::AtomicWaker;
 use futures_util::FutureExt;
 use io_uring::cqueue::buffer_select;
 use io_uring::opcode::Nop;
-use io_uring::ownedsplit::{SubmissionUring, SubmitterUring};
 use nix::unistd;
 use parking_lot::Mutex;
 
 use crate::buffer::GroupBufferRegisterState;
 use crate::cqe_ext::EntryExt;
 use crate::driver::{Callback, Driver, DRIVER};
+use crate::owned_ring::{SubmissionUring, SubmitterUring};
 
 thread_local! {
     static TASK_SENDER: RefCell<Option<Sender<Runnable>>> = RefCell::new(None);
