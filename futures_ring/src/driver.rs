@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fmt::{Debug, Formatter};
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::mem::MaybeUninit;
-use std::os::unix::prelude::RawFd;
+use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::Waker;
@@ -17,9 +17,9 @@ use io_uring::{IoUring, Probe};
 use nix::sys::socket::SockAddr;
 use parking_lot::Mutex;
 
-use crate::buffer::{Buffer, BufferManager, GroupBufferRegisterState};
+use crate::buffer::{Buffer, GroupBufferRegisterState};
 use crate::callback::{Callback, CallbacksAndCompleteEntries};
-use crate::owned_ring::{SplitRing, SubmissionUring, SubmitterUring};
+use crate::driver_resource::DriverResource;
 use crate::reactor::Reactor;
 
 #[derive(Debug, Clone, Default)]
@@ -63,15 +63,12 @@ impl DriverBuilder {
 
 #[derive(Clone)]
 pub struct Driver {
-    pub(crate) sq: Arc<Mutex<SubmissionUring>>,
-    pub(crate) submitter: SubmitterUring,
+    driver_resource: Arc<DriverResource>,
 
     pub(crate) next_user_data: Arc<AtomicU64>,
 
     /// when sq is full, store the waker, after consume cqe, wake all of them
     pub(crate) wait_for_push_wakers: Arc<Mutex<VecDeque<Waker>>>,
-
-    pub(crate) buffer_manager: Arc<Mutex<BufferManager>>,
 
     pub(crate) callbacks_and_complete_entries: Arc<Mutex<CallbacksAndCompleteEntries>>,
 
@@ -114,26 +111,30 @@ impl Driver {
         let ring = builder.build(entries.unwrap_or(4096))?;
 
         if !check_support_provide_buffers(&ring)? {
-            panic!("The kernel doesn't support IORING_OP_PROVIDE_BUFFERS");
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "The kernel doesn't support IORING_OP_PROVIDE_BUFFERS",
+            ));
         }
 
         if !check_support_fast_poll(&ring) {
-            panic!("The kernel doesn't support io_uring fast_poll");
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "The kernel doesn't support io_uring fast_poll",
+            ));
         }
 
-        let (submitter, sq, cq) = ring.owned_split();
+        let driver_resource = Arc::new(DriverResource::new(ring));
 
         let driver = Self {
-            sq: Arc::new(Mutex::new(sq)),
-            submitter: submitter.clone(),
+            driver_resource: driver_resource.clone(),
             next_user_data: Arc::new(AtomicU64::new(1)),
             wait_for_push_wakers: Default::default(),
-            buffer_manager: Arc::new(Mutex::new(BufferManager::new())),
             callbacks_and_complete_entries: Default::default(),
             background_sqes: Default::default(),
         };
 
-        let reactor = Reactor::new(&driver, submitter, cq);
+        let reactor = Reactor::new(&driver, driver_resource);
 
         Ok((driver, reactor))
     }
@@ -143,7 +144,7 @@ impl Driver {
         buffer_size: usize,
         waker: &Waker,
     ) -> Result<Option<u16>> {
-        let mut buffer_manager = self.buffer_manager.lock();
+        let mut buffer_manager = self.driver_resource.buffer_manager();
         let group_buffer = buffer_manager.select_group_buffer(buffer_size);
 
         if group_buffer.register_state() == GroupBufferRegisterState::Registered {
@@ -176,23 +177,28 @@ impl Driver {
         // find the callback
         let mut callbacks_and_complete_entries = self.callbacks_and_complete_entries.lock();
 
-        let mut sq = self.sq.lock();
-
         // register the group buffer
         unsafe {
-            if sq.submission().push(&provide_buffer_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self
+                .driver_resource
+                .submission()
+                .push(&provide_buffer_sqe)
+                .is_err()
+            {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&provide_buffer_sqe).is_err() {
+                if self
+                    .driver_resource
+                    .submission()
+                    .push(&provide_buffer_sqe)
+                    .is_err()
+                {
                     return Ok(None);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         callbacks_and_complete_entries.callbacks.insert(
             user_data,
@@ -213,7 +219,7 @@ impl Driver {
         buffer_id: u16,
         buffer_data_size: usize,
     ) -> Buffer {
-        self.buffer_manager.lock().take_buffer(
+        self.driver_resource.buffer_manager().take_buffer(
             buffer_size,
             group_id,
             buffer_id,
@@ -222,14 +228,21 @@ impl Driver {
         )
     }
 
-    pub(crate) fn give_back_buffer_with_id(&self, group_id: u16, buffer_id: u16) {
-        let mut buffer_manager = self.buffer_manager.lock();
+    pub(crate) fn give_back_buffer_with_id(
+        &self,
+        group_id: u16,
+        buffer_id: u16,
+        need_decrease_on_fly: bool,
+    ) {
+        let mut buffer_manager = self.driver_resource.buffer_manager();
 
         let group_buffer = buffer_manager
             .group_buffer_mut(group_id)
             .unwrap_or_else(|| panic!("group buffer {} not found", group_id));
 
-        group_buffer.decrease_on_fly();
+        if need_decrease_on_fly {
+            group_buffer.decrease_on_fly();
+        }
 
         let ptr_mut = group_buffer.low_level_buffer_by_buffer_id(buffer_id);
         let len = group_buffer.every_buf_size();
@@ -256,8 +269,8 @@ impl Driver {
         buffer_size: usize,
         group_id: u16,
     ) {
-        self.buffer_manager
-            .lock()
+        self.driver_resource
+            .buffer_manager()
             .decrease_on_fly_for_not_use_group_buffer(buffer_size, group_id);
     }
 
@@ -274,14 +287,12 @@ impl Driver {
         // callback
         let mut callbacks_and_complete_entries = self.callbacks_and_complete_entries.lock();
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
                 // sq is still full, push in next times
-                if sq.submission().push(&sqe).is_err() {
+                if self.driver_resource.submission().push(&sqe).is_err() {
                     self.wait_for_push_wakers.lock().push_back(waker);
 
                     return Ok(None);
@@ -289,14 +300,11 @@ impl Driver {
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
         callbacks_and_complete_entries
             .callbacks
             .insert(user_data, Callback::Wakeup { waker });
 
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         Ok(Some(user_data))
     }
@@ -320,22 +328,17 @@ impl Driver {
                 .remove(&user_data);
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         Ok(())
     }
@@ -367,22 +370,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelRead
         callbacks_and_complete_entries
@@ -424,22 +422,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelConnect
         callbacks_and_complete_entries
@@ -476,22 +469,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelOpenAt
         callbacks_and_complete_entries
@@ -533,22 +521,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelStatx
         callbacks_and_complete_entries
@@ -590,22 +573,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelStatx
         callbacks_and_complete_entries
@@ -642,22 +620,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelStatx
         callbacks_and_complete_entries
@@ -694,22 +667,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelTimeout
         callbacks_and_complete_entries
@@ -751,22 +719,17 @@ impl Driver {
             return Ok(());
         }
 
-        let mut sq = self.sq.lock();
-
         unsafe {
-            if sq.submission().push(&cancel_sqe).is_err() {
-                self.submitter.submitter().submit()?;
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
 
-                if sq.submission().push(&cancel_sqe).is_err() {
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
                     self.background_sqes.lock().push_back(cancel_sqe);
                 }
             }
         }
 
-        // release sq ASAP
-        drop(sq);
-
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         // change the callback to CancelConnect
         callbacks_and_complete_entries.callbacks.insert(

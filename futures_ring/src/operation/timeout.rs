@@ -130,7 +130,7 @@ mod tests {
 
             dbg!(start.elapsed());
         } else {
-            panic!("nop is still no ready");
+            panic!("timeout is still no ready");
         }
     }
 }

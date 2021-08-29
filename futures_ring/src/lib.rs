@@ -5,6 +5,6 @@ pub mod buffer;
 mod callback;
 mod cqe_ext;
 mod driver;
+mod driver_resource;
 pub mod operation;
-mod owned_ring;
 mod reactor;

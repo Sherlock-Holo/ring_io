@@ -16,7 +16,8 @@ pub(crate) enum GroupBufferRegisterState {
     Registered,
 }
 
-pub(crate) struct BufferManager {
+#[derive(Debug)]
+pub struct BufferManager {
     group_id_gen: GroupIdGenerator,
     /// key: buffer len
     group_buffers: HashMap<usize, GroupBuffers>,
@@ -107,6 +108,7 @@ impl BufferManager {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct GroupBuffers {
     buffer_size: usize,
     group_buffers: HashMap<u16, GroupBuffer>,
@@ -313,7 +315,10 @@ impl GroupBuffer {
     }
 
     pub(crate) fn low_level_buffer_by_buffer_id(&mut self, buffer_id: u16) -> *mut u8 {
-        (&mut self.low_level_buffer[(buffer_id as usize * self.every_buf_size)..]).as_mut_ptr()
+        // because buffer_id start from 1
+        let offset = buffer_id as usize - 1;
+
+        (&mut self.low_level_buffer[(offset as usize * self.every_buf_size)..]).as_mut_ptr()
     }
 
     pub(crate) fn every_buf_size(&self) -> usize {
@@ -339,7 +344,7 @@ pub struct Buffer {
     buf_size: usize,
     available_size: usize,
     used: usize,
-    driver: Driver,
+    driver: Option<Driver>,
 }
 
 impl Buffer {
@@ -361,7 +366,7 @@ impl Buffer {
             buf_size,
             available_size,
             used: 0,
-            driver,
+            driver: Some(driver),
         }
     }
 
@@ -386,6 +391,11 @@ impl Buffer {
 
         debug_assert!(self.used <= self.available_size);
     }
+
+    /// don't return the buffer to the driver
+    pub fn forget(mut self) {
+        self.driver.take();
+    }
 }
 
 unsafe impl Send for Buffer {}
@@ -403,7 +413,10 @@ impl Deref for Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.driver
-            .give_back_buffer_with_id(self.group_id, self.buffer_id);
+        if let Some(driver) = &self.driver {
+            // don't decrease on fly because when a Buffer created by take_buffer, the on_fly is
+            // decreased
+            driver.give_back_buffer_with_id(self.group_id, self.buffer_id, false);
+        }
     }
 }

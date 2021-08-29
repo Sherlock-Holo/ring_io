@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{Error, Result};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::Waker;
@@ -12,27 +13,20 @@ use io_uring::types::{SubmitArgs, Timespec};
 use nix::unistd;
 use parking_lot::Mutex;
 
-use crate::buffer::{BufferManager, GroupBufferRegisterState};
+use crate::buffer::GroupBufferRegisterState;
 use crate::callback::{Callback, CallbacksAndCompleteEntries};
 use crate::cqe_ext::EntryExt;
 use crate::driver::Driver;
-use crate::owned_ring::{CompletionUring, SubmissionUring, SubmitterUring};
+use crate::driver_resource::DriverResource;
 
 pub struct Reactor {
     // use to generate user data for new sqe
     next_user_data: Arc<AtomicU64>,
 
-    // use to submit background sqe
-    sq: Arc<Mutex<SubmissionUring>>,
-    submitter: SubmitterUring,
-
-    cq: CompletionUring,
+    driver_resource: Arc<DriverResource>,
 
     // the op future will store the waker here, if it needs some resources but they're not ready
     wait_for_push_wakers: Arc<Mutex<VecDeque<Waker>>>,
-
-    // use to set GroupBuffer available, or release the buffer
-    buffer_manager: Arc<Mutex<BufferManager>>,
 
     pub(crate) callbacks_and_complete_entries: Arc<Mutex<CallbacksAndCompleteEntries>>,
 
@@ -41,14 +35,11 @@ pub struct Reactor {
 }
 
 impl Reactor {
-    pub(crate) fn new(driver: &Driver, submitter: SubmitterUring, cq: CompletionUring) -> Self {
+    pub(crate) fn new(driver: &Driver, driver_resource: Arc<DriverResource>) -> Self {
         Self {
             next_user_data: driver.next_user_data.clone(),
-            sq: driver.sq.clone(),
-            submitter,
-            cq,
+            driver_resource,
             wait_for_push_wakers: driver.wait_for_push_wakers.clone(),
-            buffer_manager: driver.buffer_manager.clone(),
             callbacks_and_complete_entries: driver.callbacks_and_complete_entries.clone(),
             background_sqes: driver.background_sqes.clone(),
         }
@@ -61,16 +52,10 @@ impl Reactor {
 
         self.try_push_all_background_sqes()?;
 
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
-        /*if let Some(cqe) = self.cq.completion().next() {
-            self.handle_cqe(cqe);
-
-            Ok(true)
-        } else {
-            Ok(false)
-        }*/
-        let cqe = self.cq.completion().next();
+        // Safety: only reactor will call completion
+        let cqe = unsafe { self.driver_resource.completion() }.next();
         if let Some(cqe) = cqe {
             self.handle_cqe(cqe);
 
@@ -87,9 +72,10 @@ impl Reactor {
 
         self.try_push_all_background_sqes()?;
 
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
-        let cq = self.cq.completion().collect::<Vec<_>>();
+        // Safety: only reactor will call completion
+        let cq = unsafe { self.driver_resource.completion() }.collect::<Vec<_>>();
         if cq.is_empty() {
             return Ok(0);
         }
@@ -118,14 +104,15 @@ impl Reactor {
 
             let submit_args = SubmitArgs::new().timespec(&timespec);
 
-            self.submitter
+            self.driver_resource
                 .submitter()
                 .submit_with_args(1, &submit_args)?;
         } else {
-            self.submitter.submitter().submit_and_wait(1)?;
+            self.driver_resource.submitter().submit_and_wait(1)?;
         }
 
-        let cq = self.cq.completion().collect::<Vec<_>>();
+        // Safety: only reactor will call completion
+        let cq = unsafe { self.driver_resource.completion() }.collect::<Vec<_>>();
         if cq.is_empty() {
             return Ok(0);
         }
@@ -146,20 +133,19 @@ impl Reactor {
     }
 
     fn try_push_all_background_sqes(&mut self) -> Result<()> {
-        let mut sq = self.sq.lock();
         let mut background_sqes = self.background_sqes.lock();
 
         while let Some(sqe) = background_sqes.pop_front() {
             unsafe {
-                if sq.submission().push(&sqe).is_err() {
+                if self.driver_resource.submission().push(&sqe).is_err() {
                     // push back the sqe, because it isn't consumed
-                    if let Err(err) = self.submitter.submitter().submit() {
+                    if let Err(err) = self.driver_resource.submitter().submit() {
                         background_sqes.push_front(sqe);
 
                         return Err(err);
                     }
 
-                    if sq.submission().push(&sqe).is_err() {
+                    if self.driver_resource.submission().push(&sqe).is_err() {
                         background_sqes.push_front(sqe);
 
                         break;
@@ -168,7 +154,7 @@ impl Reactor {
             }
         }
 
-        self.submitter.submitter().submit()?;
+        self.driver_resource.submitter().submit()?;
 
         Ok(())
     }
@@ -249,7 +235,9 @@ impl Reactor {
                         );
                     }
 
-                    let mut buffer_manager = self.buffer_manager.lock();
+                    let mut buffer_manager = self.driver_resource.buffer_manager();
+
+                    dbg!(buffer_manager.deref());
 
                     let group_buffer = buffer_manager
                         .group_buffer_mut(group_id)
@@ -314,7 +302,7 @@ impl Reactor {
         buffer_id: u16,
         callbacks_and_complete_entries: &mut CallbacksAndCompleteEntries,
     ) {
-        let mut buffer_manager = self.buffer_manager.lock();
+        let mut buffer_manager = self.driver_resource.buffer_manager();
 
         let group_buffer = buffer_manager
             .group_buffer_mut(group_id)
