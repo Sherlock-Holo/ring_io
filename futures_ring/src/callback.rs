@@ -4,6 +4,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::prelude::RawFd;
 use std::task::Waker;
 
+use bytes::Bytes;
 use io_uring::cqueue::Entry;
 use io_uring::types::Timespec;
 use nix::sys::socket::SockAddr;
@@ -58,6 +59,11 @@ pub enum Callback {
     CancelAccept {
         peer_addr: Box<libc::sockaddr_storage>,
         addr_size: Box<libc::socklen_t>,
+    },
+
+    // save the data so won't break the pointer that in the io_uring
+    CancelWrite {
+        data: Bytes,
     },
 }
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
+use bytes::Bytes;
 use io_uring::cqueue::Entry as CqEntry;
 use io_uring::opcode::{AsyncCancel, ProvideBuffers};
 use io_uring::squeue::Entry as SqEntry;
@@ -739,6 +740,53 @@ impl Driver {
                 addr_size,
             },
         );
+
+        Ok(())
+    }
+
+    /// cancel the write event, when the event canceled or ready after cancel, let the drop release
+    /// data
+    pub(crate) fn cancel_write(&self, user_data: u64, data: Bytes) -> Result<()> {
+        let background_user_data = self.next_user_data.fetch_add(1, Ordering::Relaxed);
+
+        let cancel_sqe = AsyncCancel::new(user_data)
+            .build()
+            .user_data(background_user_data);
+
+        // lock the callback at first, so the reactor won't acquire the cancel cqe but can't find
+        // the callback
+        let mut callbacks_and_complete_entries = self.callbacks_and_complete_entries.lock();
+
+        // the cqe callback is run, we need to clear the completion_queue_entries, and no need to
+        // cancel sqe
+        if callbacks_and_complete_entries
+            .callbacks
+            .remove(&user_data)
+            .is_none()
+        {
+            callbacks_and_complete_entries
+                .completion_queue_entries
+                .remove(&user_data);
+
+            return Ok(());
+        }
+
+        unsafe {
+            if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                self.driver_resource.submitter().submit()?;
+
+                if self.driver_resource.submission().push(&cancel_sqe).is_err() {
+                    self.background_sqes.lock().push_back(cancel_sqe);
+                }
+            }
+        }
+
+        self.driver_resource.submitter().submit()?;
+
+        // change the callback to CancelTimeout
+        callbacks_and_complete_entries
+            .callbacks
+            .insert(user_data, Callback::CancelWrite { data });
 
         Ok(())
     }

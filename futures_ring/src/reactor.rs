@@ -213,7 +213,8 @@ impl Reactor {
                     | Callback::CancelRenameAt { .. }
                     | Callback::CancelUnlinkAt { .. }
                     | Callback::CancelTimeout { .. }
-                    | Callback::CancelAccept { .. } => {}
+                    | Callback::CancelAccept { .. }
+                    | Callback::CancelWrite { .. } => {}
                 }
 
                 return;
@@ -291,7 +292,8 @@ impl Reactor {
                 Callback::CancelStatx { .. }
                 | Callback::CancelRenameAt { .. }
                 | Callback::CancelUnlinkAt { .. }
-                | Callback::CancelTimeout { .. } => {}
+                | Callback::CancelTimeout { .. }
+                | Callback::CancelWrite { .. } => {}
             }
         }
     }
