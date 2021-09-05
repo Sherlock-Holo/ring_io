@@ -97,7 +97,13 @@ impl Future for Read {
                             )))
                         }
                     }
-                }?;
+                }
+                .map_err(|err| {
+                    // drop won't send useless cancel when error happened
+                    self.user_data.take();
+
+                    err
+                })?;
 
                 match buffer {
                     ReadBufferState::None => Poll::Pending,

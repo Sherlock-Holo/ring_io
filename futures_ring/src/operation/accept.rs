@@ -57,7 +57,13 @@ impl Future for Accept {
                 .driver
                 .take_cqe_with_waker(user_data, cx.waker())
                 .map(|cqe| cqe.ok())
-                .transpose()?;
+                .transpose()
+                .map_err(|err| {
+                    // drop won't send useless cancel when error happened
+                    this.user_data.take();
+
+                    err
+                })?;
 
             return match accept_cqe {
                 None => Poll::Pending,

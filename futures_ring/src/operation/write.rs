@@ -62,7 +62,13 @@ impl Future for Write {
                 .driver
                 .take_cqe_with_waker(user_data, cx.waker())
                 .map(|cqe| cqe.ok())
-                .transpose()?;
+                .transpose()
+                .map_err(|err| {
+                    // drop won't send useless cancel when error happened
+                    self.user_data.take();
+
+                    err
+                })?;
 
             return match write_cqe {
                 None => Poll::Pending,

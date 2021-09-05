@@ -69,7 +69,13 @@ impl Future for Connect {
                 .driver
                 .take_cqe_with_waker(user_data, cx.waker())
                 .map(|cqe| cqe.ok())
-                .transpose()?;
+                .transpose()
+                .map_err(|err| {
+                    // drop won't send useless cancel when error happened
+                    self.user_data.take();
+
+                    err
+                })?;
 
             return match connect_cqe {
                 None => Poll::Pending,

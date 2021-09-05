@@ -31,6 +31,9 @@ impl Future for Nop {
             let nop_cqe = self.driver.take_cqe_with_waker(user_data, cx.waker());
 
             return if nop_cqe.is_some() {
+                // drop won't send useless cancel
+                self.user_data.take();
+
                 Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
