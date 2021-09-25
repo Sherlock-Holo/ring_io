@@ -8,7 +8,7 @@ edition = "2018"
 
 [workspace]
 members = [
-    "futures_ring"
+    "futures_uring"
 ]
 
 [dependencies]

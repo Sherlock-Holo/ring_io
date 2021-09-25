@@ -81,8 +81,9 @@ impl Future for Write {
             };
         }
 
-        let write_sqe =
-            RingWrite::new(Fd(self.fd), self.data.as_ptr(), self.data.len() as _).build();
+        let write_sqe = RingWrite::new(Fd(self.fd), self.data.as_ptr(), self.data.len() as _)
+            .offset(self.offset)
+            .build();
 
         let user_data = self
             .driver

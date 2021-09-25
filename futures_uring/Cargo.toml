@@ -1,5 +1,5 @@
 [package]
-name = "futures_ring"
+name = "futures_uring"
 version = "0.1.0"
 edition = "2018"
 authors = ["Sherlock Holo <sherlockya@gmail.com>"]
