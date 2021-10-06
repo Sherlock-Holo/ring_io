@@ -344,9 +344,9 @@ impl Driver {
         Ok(())
     }
 
-    /// cancel the read event, when the event canceled or ready after cancel, give back the buffer
-    /// if buffer is used
-    pub(crate) fn cancel_read(&self, user_data: u64, group_id: u16) -> Result<()> {
+    /// cancel the read or recv event, when the event canceled or ready after cancel, give back the
+    /// buffer if buffer is used
+    pub(crate) fn cancel_read_or_recv(&self, user_data: u64, group_id: u16) -> Result<()> {
         let background_user_data = self.next_user_data.fetch_add(1, Ordering::Relaxed);
 
         let cancel_sqe = AsyncCancel::new(user_data)
@@ -386,7 +386,7 @@ impl Driver {
         // change the callback to CancelRead
         callbacks_and_complete_entries
             .callbacks
-            .insert(user_data, Callback::CancelRead { group_id });
+            .insert(user_data, Callback::CancelReadOrRecv { group_id });
 
         Ok(())
     }
@@ -744,9 +744,9 @@ impl Driver {
         Ok(())
     }
 
-    /// cancel the write event, when the event canceled or ready after cancel, let the drop release
-    /// data
-    pub(crate) fn cancel_write(&self, user_data: u64, data: Bytes) -> Result<()> {
+    /// cancel the write or send event, when the event canceled or ready after cancel, let the drop
+    /// release data
+    pub(crate) fn cancel_write_or_send(&self, user_data: u64, data: Bytes) -> Result<()> {
         let background_user_data = self.next_user_data.fetch_add(1, Ordering::Relaxed);
 
         let cancel_sqe = AsyncCancel::new(user_data)
@@ -786,7 +786,7 @@ impl Driver {
         // change the callback to CancelTimeout
         callbacks_and_complete_entries
             .callbacks
-            .insert(user_data, Callback::CancelWrite { data });
+            .insert(user_data, Callback::CancelWriteOrSend { data });
 
         Ok(())
     }

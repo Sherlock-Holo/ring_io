@@ -5,55 +5,41 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use io_uring::opcode::Write as RingWrite;
+use io_uring::opcode::Send as RingSend;
 use io_uring::types::Fd;
-use libc::off_t;
 
 use crate::cqe_ext::EntryExt;
 use crate::Driver;
 
 #[must_use = "Future do nothing unless you `.await` or poll them"]
 #[derive(Debug)]
-pub struct Write {
+pub struct Send {
     fd: RawFd,
     data: Bytes,
     user_data: Option<u64>,
-    offset: off_t,
+    flags: Option<libc::c_int>,
     driver: Driver,
 }
 
-impl Write {
-    pub unsafe fn new_file<FD: AsRawFd, O: Into<Option<libc::off_t>>, B: Into<Bytes>>(
-        fd: &FD,
-        offset: O,
-        data: B,
-        driver: &Driver,
-    ) -> Self {
+impl Send {
+    pub unsafe fn new<FD: AsRawFd, B: Into<Bytes>>(fd: &FD, data: B, driver: &Driver) -> Self {
         Self {
             fd: fd.as_raw_fd(),
             data: data.into(),
             user_data: None,
-            offset: offset.into().unwrap_or(-1),
+            flags: None,
             driver: driver.clone(),
         }
     }
 
-    pub unsafe fn new_socket<FD: AsRawFd, B: Into<Bytes>>(
-        fd: &FD,
-        data: B,
-        driver: &Driver,
-    ) -> Self {
-        Self {
-            fd: fd.as_raw_fd(),
-            data: data.into(),
-            user_data: None,
-            offset: 0,
-            driver: driver.clone(),
-        }
+    pub fn flags(mut self, flags: libc::c_int) -> Self {
+        self.flags.replace(flags);
+
+        self
     }
 }
 
-impl Future for Write {
+impl Future for Send {
     type Output = Result<usize>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -81,13 +67,16 @@ impl Future for Write {
             };
         }
 
-        let write_sqe = RingWrite::new(Fd(self.fd), self.data.as_ptr(), self.data.len() as _)
-            .offset(self.offset)
-            .build();
+        let mut send_sqe = RingSend::new(Fd(self.fd), self.data.as_ptr(), self.data.len() as _);
+        if let Some(flags) = self.flags {
+            send_sqe = send_sqe.flags(flags);
+        }
+
+        let send_sqe = send_sqe.build();
 
         let user_data = self
             .driver
-            .push_sqe_with_waker(write_sqe, cx.waker().clone())?;
+            .push_sqe_with_waker(send_sqe, cx.waker().clone())?;
 
         user_data.map(|user_data| self.user_data.replace(user_data));
 
@@ -95,7 +84,7 @@ impl Future for Write {
     }
 }
 
-impl Drop for Write {
+impl Drop for Send {
     fn drop(&mut self) {
         if let Some(user_data) = self.user_data {
             // clone the Bytes will still pointer to the same address
@@ -108,17 +97,13 @@ impl Drop for Write {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use std::fs;
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::Read;
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::SyncSender;
     use std::sync::{mpsc, Arc};
     use std::thread;
 
-    use bytes::Buf;
     use futures_task::ArcWake;
-    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
 
@@ -133,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_socket() {
+    fn test_send_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -146,7 +131,7 @@ mod tests {
 
         let (driver, mut reactor) = Driver::builder().build().unwrap();
 
-        let mut write = unsafe { Write::new_socket(&tcp1, &b"test"[..], &driver) };
+        let mut write = unsafe { Send::new(&tcp1, &b"test"[..], &driver) };
 
         let (tx, rx) = mpsc::sync_channel(1);
 
@@ -170,56 +155,7 @@ mod tests {
 
             assert_eq!(&b"test"[..n], &buf);
         } else {
-            panic!("write is still no ready");
+            panic!("send is still no ready");
         }
-    }
-
-    #[test]
-    fn test_write_file() {
-        let data = fs::read("testdata/book.txt").unwrap();
-        let mut write_data = Bytes::copy_from_slice(&data);
-
-        let tmp_dir = TempDir::new_in(env::temp_dir()).unwrap();
-        let mut tmp_file = NamedTempFile::new_in(tmp_dir.path()).unwrap();
-
-        let (driver, mut reactor) = Driver::builder().build().unwrap();
-
-        let mut write = unsafe { Write::new_file(&tmp_file, None, write_data.clone(), &driver) };
-
-        let (tx, rx) = mpsc::sync_channel(1);
-
-        let waker = Arc::new(ArcWaker { tx });
-        let waker = futures_task::waker(waker);
-
-        loop {
-            match Pin::new(&mut write).poll(&mut Context::from_waker(&waker)) {
-                Poll::Pending => {
-                    assert!(reactor.run_at_least_one(None).unwrap() > 0);
-
-                    rx.recv().unwrap();
-                }
-
-                Poll::Ready(result) => {
-                    let n = result.unwrap();
-
-                    if n == 0 {
-                        break;
-                    }
-
-                    write_data.advance(n);
-
-                    write =
-                        unsafe { Write::new_file(&tmp_file, None, write_data.clone(), &driver) };
-                }
-            }
-        }
-
-        tmp_file.seek(SeekFrom::Start(0)).unwrap();
-
-        let mut written_data = vec![];
-
-        tmp_file.read_to_end(&mut written_data).unwrap();
-
-        assert_eq!(data, written_data);
     }
 }

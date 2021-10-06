@@ -193,7 +193,7 @@ impl Reactor {
                     }
 
                     // a read event is canceled
-                    Callback::CancelRead { group_id } => {
+                    Callback::CancelReadOrRecv { group_id } => {
                         if let Some(buffer_id) = buffer_select(cqe.flags()) {
                             self.give_back_buffer_with_id(
                                 group_id,
@@ -214,7 +214,7 @@ impl Reactor {
                     | Callback::CancelUnlinkAt { .. }
                     | Callback::CancelTimeout { .. }
                     | Callback::CancelAccept { .. }
-                    | Callback::CancelWrite { .. } => {}
+                    | Callback::CancelWriteOrSend { .. } => {}
                 }
 
                 return;
@@ -227,14 +227,13 @@ impl Reactor {
         {
             match callback {
                 Callback::ProvideBuffer { group_id } => {
-                    if cqe.is_err() {
-                        panic!(
-                            "unexpect error for ProvideBuffers {}, group_id {}, user_data {}",
-                            Error::from_raw_os_error(-cqe.result()),
-                            group_id,
-                            user_data
-                        );
-                    }
+                    assert!(
+                        !cqe.is_err(),
+                        "unexpect error for ProvideBuffers {}, group_id {}, user_data {}",
+                        Error::from_raw_os_error(-cqe.result()),
+                        group_id,
+                        user_data
+                    );
 
                     let mut buffer_manager = self.driver_resource.buffer_manager();
 
@@ -260,7 +259,7 @@ impl Reactor {
                 }
 
                 // an ready read event is canceled
-                Callback::CancelRead { group_id } => {
+                Callback::CancelReadOrRecv { group_id } => {
                     if let Some(buffer_id) = buffer_select(cqe.flags()) {
                         self.give_back_buffer_with_id(
                             group_id,
@@ -293,7 +292,7 @@ impl Reactor {
                 | Callback::CancelRenameAt { .. }
                 | Callback::CancelUnlinkAt { .. }
                 | Callback::CancelTimeout { .. }
-                | Callback::CancelWrite { .. } => {}
+                | Callback::CancelWriteOrSend { .. } => {}
             }
         }
     }

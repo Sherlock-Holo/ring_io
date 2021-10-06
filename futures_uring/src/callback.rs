@@ -15,7 +15,7 @@ pub enum Callback {
         group_id: u16,
     },
 
-    CancelRead {
+    CancelReadOrRecv {
         group_id: u16,
     },
 
@@ -62,7 +62,7 @@ pub enum Callback {
     },
 
     // save the data so won't break the pointer that in the io_uring
-    CancelWrite {
+    CancelWriteOrSend {
         data: Bytes,
     },
 }

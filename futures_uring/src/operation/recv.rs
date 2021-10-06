@@ -6,10 +6,9 @@ use std::ptr;
 use std::task::{Context, Poll};
 
 use io_uring::cqueue::buffer_select;
-use io_uring::opcode::Read as RingRead;
+use io_uring::opcode::Recv as RingRecv;
 use io_uring::squeue::Flags;
 use io_uring::types::Fd;
-use libc::off_t;
 
 use crate::buffer::Buffer;
 use crate::cqe_ext::EntryExt;
@@ -17,45 +16,35 @@ use crate::Driver;
 
 #[must_use = "Future do nothing unless you `.await` or poll them"]
 #[derive(Debug)]
-pub struct Read {
+pub struct Recv {
     fd: RawFd,
     want_buf_size: usize,
     group_id: Option<u16>,
     user_data: Option<u64>,
-    offset: off_t,
+    flags: Option<libc::c_int>,
     driver: Driver,
 }
 
-impl Read {
-    pub unsafe fn new_file<FD: AsRawFd, O: Into<Option<libc::off_t>>>(
-        fd: &FD,
-        want_size: usize,
-        offset: O,
-        driver: &Driver,
-    ) -> Self {
+impl Recv {
+    pub unsafe fn new<FD: AsRawFd>(fd: &FD, want_size: usize, driver: &Driver) -> Self {
         Self {
             fd: fd.as_raw_fd(),
             want_buf_size: want_size.next_power_of_two().min(65536),
             group_id: None,
             user_data: None,
-            offset: offset.into().unwrap_or(-1),
+            flags: None,
             driver: driver.clone(),
         }
     }
 
-    pub unsafe fn new_socket<FD: AsRawFd>(fd: &FD, want_size: usize, driver: &Driver) -> Self {
-        Self {
-            fd: fd.as_raw_fd(),
-            want_buf_size: want_size.next_power_of_two().min(65536),
-            group_id: None,
-            user_data: None,
-            offset: 0,
-            driver: driver.clone(),
-        }
+    pub fn flags(mut self, flags: libc::c_int) -> Self {
+        self.flags.replace(flags);
+
+        self
     }
 }
 
-impl Future for Read {
+impl Future for Recv {
     type Output = Result<Buffer>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -121,11 +110,14 @@ impl Future for Read {
             (None, Some(_)) => unreachable!(),
 
             (Some(group_id), None) => {
-                let sqe = RingRead::new(Fd(self.fd), ptr::null_mut(), self.want_buf_size as _)
-                    .offset(self.offset)
-                    .buf_group(group_id)
-                    .build()
-                    .flags(Flags::BUFFER_SELECT);
+                let mut sqe = RingRecv::new(Fd(self.fd), ptr::null_mut(), self.want_buf_size as _)
+                    .buf_group(group_id);
+
+                if let Some(flags) = self.flags {
+                    sqe = sqe.flags(flags);
+                }
+
+                let sqe = sqe.build().flags(Flags::BUFFER_SELECT);
 
                 let user_data = self.driver.push_sqe_with_waker(sqe, cx.waker().clone())?;
 
@@ -141,12 +133,15 @@ impl Future for Read {
                 {
                     None => Poll::Pending,
                     Some(group_id) => {
-                        let sqe =
-                            RingRead::new(Fd(self.fd), ptr::null_mut(), self.want_buf_size as _)
-                                .offset(self.offset)
-                                .buf_group(group_id)
-                                .build()
-                                .flags(Flags::BUFFER_SELECT);
+                        let mut sqe =
+                            RingRecv::new(Fd(self.fd), ptr::null_mut(), self.want_buf_size as _)
+                                .buf_group(group_id);
+
+                        if let Some(flags) = self.flags {
+                            sqe = sqe.flags(flags);
+                        }
+
+                        let sqe = sqe.build().flags(Flags::BUFFER_SELECT);
 
                         let user_data = self.driver.push_sqe_with_waker(sqe, cx.waker().clone())?;
 
@@ -161,7 +156,7 @@ impl Future for Read {
     }
 }
 
-impl Drop for Read {
+impl Drop for Recv {
     fn drop(&mut self) {
         match (self.group_id, self.user_data) {
             (Some(group_id), Some(user_data)) => {
@@ -182,7 +177,6 @@ impl Drop for Read {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::{self, SyncSender};
@@ -204,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_socket() {
+    fn test_recv_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -219,7 +213,7 @@ mod tests {
 
         let (driver, mut reactor) = Driver::builder().build().unwrap();
 
-        let mut read = unsafe { Read::new_socket(&tcp2, 100, &driver) };
+        let mut recv = unsafe { Recv::new(&tcp2, 100, &driver) };
 
         let (tx, rx) = mpsc::sync_channel(1);
 
@@ -227,7 +221,7 @@ mod tests {
         let waker = futures_task::waker(waker);
 
         // preparing the ProviderBuffer
-        assert!(Pin::new(&mut read)
+        assert!(Pin::new(&mut recv)
             .poll(&mut Context::from_waker(&waker))
             .is_pending());
 
@@ -236,65 +230,24 @@ mod tests {
 
         rx.recv().unwrap();
 
-        // preparing the read
-        assert!(Pin::new(&mut read)
+        // preparing the recv
+        assert!(Pin::new(&mut recv)
             .poll(&mut Context::from_waker(&waker))
             .is_pending());
 
-        // wait read become ready
+        // wait recv become ready
         assert_eq!(reactor.run_at_least_one(None).unwrap(), 1);
 
         rx.recv().unwrap();
 
         if let Poll::Ready(result) =
-            Pin::new(&mut read).poll(&mut Context::from_waker(futures_task::noop_waker_ref()))
+            Pin::new(&mut recv).poll(&mut Context::from_waker(futures_task::noop_waker_ref()))
         {
             let buffer = result.unwrap();
 
             assert_eq!(b"test", buffer.as_ref());
         } else {
-            panic!("read is still no ready");
+            panic!("recv is still no ready");
         }
-    }
-
-    #[test]
-    fn test_read_file() {
-        let file = File::open("testdata/book.txt").unwrap();
-        let file_content = fs::read("testdata/book.txt").unwrap();
-
-        let (driver, mut reactor) = Driver::builder().build().unwrap();
-
-        let mut read = unsafe { Read::new_file(&file, 100, None, &driver) };
-
-        let (tx, rx) = mpsc::sync_channel(1);
-
-        let waker = Arc::new(ArcWaker { tx });
-        let waker = futures_task::waker(waker);
-
-        let mut read_content = vec![];
-        loop {
-            match Pin::new(&mut read).poll(&mut Context::from_waker(&waker)) {
-                Poll::Pending => {
-                    assert!(reactor.run_at_least_one(None).unwrap() > 0);
-
-                    rx.recv().unwrap();
-                }
-
-                Poll::Ready(result) => {
-                    let buffer = result.unwrap();
-
-                    // read to the end
-                    if buffer.is_empty() {
-                        break;
-                    }
-
-                    read_content.extend_from_slice(&buffer);
-
-                    read = unsafe { Read::new_file(&file, 100, None, &driver) };
-                }
-            }
-        }
-
-        assert_eq!(file_content, read_content);
     }
 }

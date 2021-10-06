@@ -1,7 +1,6 @@
 use std::ffi::CString;
 use std::future::Future;
-use std::io::{Error, ErrorKind, Result};
-use std::os::unix::ffi::OsStrExt;
+use std::io::Result;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::pin::Pin;
@@ -12,6 +11,7 @@ use io_uring::types::Fd;
 use libc::{c_int, mode_t};
 
 use crate::cqe_ext::EntryExt;
+use crate::helper::path_to_c_string;
 use crate::Driver;
 
 #[derive(Debug)]
@@ -23,11 +23,6 @@ pub struct Open {
     driver: Driver,
 }
 
-fn path_to_cstring(path: &Path) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|err| Error::new(ErrorKind::InvalidInput, err))
-}
-
 impl Open {
     pub fn new<P: AsRef<Path>>(
         path: P,
@@ -35,7 +30,7 @@ impl Open {
         mode: mode_t,
         driver: &Driver,
     ) -> Result<Self> {
-        let path = path_to_cstring(path.as_ref())?;
+        let path = path_to_c_string(path.as_ref())?;
 
         Ok(Self::new_cstring(path, flags, mode, driver))
     }
@@ -74,7 +69,7 @@ impl Future for Open {
                     // drop won't send useless cancel
                     self.user_data.take();
 
-                    let fd = open_at_cqe.ok()?.result();
+                    let fd = open_at_cqe.result();
 
                     // Safety: fd is valid
                     Poll::Ready(Ok(fd))
