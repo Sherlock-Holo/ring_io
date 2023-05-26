@@ -1,11 +1,10 @@
-pub use runtime::{spawn, spawn_blocking};
+use std::io;
 
-mod buffer;
-mod cqe_ext;
+pub mod buf;
 mod driver;
-pub mod fs;
-pub mod io;
-pub mod net;
-mod owned_ring;
-pub mod runtime;
-pub mod time;
+pub mod op;
+pub mod opcode;
+mod operation;
+mod runtime;
+
+pub type BufResult<T, B> = (io::Result<T>, B);
