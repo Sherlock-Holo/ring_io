@@ -5,6 +5,7 @@ pub use runtime::block_on;
 pub mod buf;
 mod driver;
 pub mod fs;
+pub mod net;
 pub mod op;
 pub mod opcode;
 mod operation;

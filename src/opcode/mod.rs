@@ -1,4 +1,5 @@
 pub use close::Close;
+pub use connect::Connect;
 pub use open::Open;
 pub use read::Read;
 pub use recv::Recv;

@@ -49,7 +49,7 @@ mod tests {
     #[test]
     fn test_close_file() {
         block_on(async move {
-            let mut file = File::open("testdata/book.txt").unwrap();
+            let file = File::open("testdata/book.txt").unwrap();
             let fd = file.as_raw_fd();
 
             Close::new(fd).await.unwrap();
