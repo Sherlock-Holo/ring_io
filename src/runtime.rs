@@ -101,6 +101,8 @@ fn schedule(runnable: Runnable) {
 // all test must create a new thread, because block_on can't call nested
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use futures_timer::Delay;
@@ -143,5 +145,20 @@ mod tests {
 
         let duration = start.elapsed();
         assert_eq!(duration.as_secs(), 1);
+    }
+
+    #[test]
+    fn multi_thread() {
+        thread::spawn(|| block_on(pending::<()>()));
+
+        block_on(async move {
+            let tasks = (0..10)
+                .map(|_| spawn(async move { Delay::new(Duration::from_secs(1)).await }))
+                .collect::<Vec<_>>();
+
+            for task in tasks {
+                task.await;
+            }
+        })
     }
 }
