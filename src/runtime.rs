@@ -51,7 +51,9 @@ where
     runnable.schedule();
 
     let output = loop {
-        driver.run().unwrap();
+        driver
+            .run()
+            .unwrap_or_else(|err| panic!("driver panic {err}"));
 
         if task.is_finished() {
             match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
@@ -77,6 +79,10 @@ where
     runnable.schedule();
 
     task
+}
+
+pub(crate) fn in_ring_io_context() -> bool {
+    RUNTIME.with(|runtime| runtime.borrow().is_some())
 }
 
 pub(crate) fn with_runtime<T, F: FnOnce(&Runtime) -> T>(f: F) -> T {

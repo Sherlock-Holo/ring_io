@@ -36,7 +36,7 @@ impl<T: IoBuf> SendTo<T> {
         msghdr.msg_namelen = addr.len();
 
         let entry = opcode::SendMsg::new(Fd(fd), msghdr.as_ref() as *const _).build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
@@ -48,7 +48,6 @@ impl<T: IoBuf> SendTo<T> {
                 msg: msghdr,
             },
             receiver,
-            waker,
             data_drop,
         )
     }
@@ -65,8 +64,8 @@ impl<T: IoBuf> Completable for SendTo<T> {
         (result.map(|n| n as _), self.buffer)
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        Box::new(self)
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(Box::new(self))
     }
 }
 
@@ -91,8 +90,6 @@ mod tests {
             let fd = server.as_raw_fd();
 
             let data = Vec::from("test");
-            // let data = static_data();
-            assert_io_buf(&data);
             let (result, _) = SendTo::new(fd, data, client_addr).await;
             assert_eq!(result.unwrap(), 4);
 
@@ -101,15 +98,5 @@ mod tests {
 
             assert_eq!(&buf, b"test");
         })
-    }
-
-    fn static_data() -> &'static [u8] {
-        b"test"
-    }
-
-    fn assert_io_buf<T: IoBuf + ?Sized>(v: &T) {}
-
-    fn check() {
-        assert_io_buf(&static_data());
     }
 }

@@ -33,11 +33,11 @@ impl Accept {
             addr_of_mut!(addr_with_len.len),
         )
         .build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
-        Op::new(Self { addr_with_len }, receiver, waker, data_drop)
+        Op::new(Self { addr_with_len }, receiver, data_drop)
     }
 }
 
@@ -58,8 +58,8 @@ impl Completable for Accept {
         Ok((fd, addr))
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        self.addr_with_len as _
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(self.addr_with_len as _)
     }
 }
 

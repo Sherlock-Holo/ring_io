@@ -18,11 +18,11 @@ impl<T: IoBufMut> Read<T> {
         let entry = opcode::Read::new(Fd(fd), buf.stable_mut_ptr(), buf.bytes_total() as _)
             .offset(offset)
             .build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
-        Op::new(Self { buffer: buf }, receiver, waker, data_drop)
+        Op::new(Self { buffer: buf }, receiver, data_drop)
     }
 }
 
@@ -42,8 +42,8 @@ impl<T: IoBufMut> Completable for Read<T> {
         (result.map(|n| n as _), self.buffer)
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        Box::new(self.buffer)
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(Box::new(self.buffer))
     }
 }
 
@@ -104,8 +104,6 @@ mod tests {
 
             let (result, buf) = Read::new(fd, buf, 0).await;
             let n = result.unwrap();
-            // the most case is 4, in localhost tcp can't read 4 bytes in a read, that may not
-            // happen
             assert_eq!(n, 4);
 
             assert_eq!(buf, b"test");

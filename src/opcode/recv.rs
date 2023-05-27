@@ -16,11 +16,11 @@ pub struct Recv<T: IoBufMut> {
 impl<T: IoBufMut> Recv<T> {
     pub(crate) fn new(fd: RawFd, mut buf: T) -> Op<Self> {
         let entry = opcode::Recv::new(Fd(fd), buf.stable_mut_ptr(), buf.bytes_total() as _).build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
-        Op::new(Self { buffer: buf }, receiver, waker, data_drop)
+        Op::new(Self { buffer: buf }, receiver, data_drop)
     }
 }
 
@@ -40,8 +40,8 @@ impl<T: IoBufMut> Completable for Recv<T> {
         (result.map(|n| n as _), self.buffer)
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        Box::new(self.buffer)
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(Box::new(self.buffer))
     }
 }
 

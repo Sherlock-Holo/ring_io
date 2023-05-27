@@ -18,11 +18,11 @@ impl Connect {
     pub(crate) fn new(fd: RawFd, addr: SocketAddr) -> Op<Self> {
         let addr = Box::new(SockAddr::from(addr));
         let entry = opcode::Connect::new(Fd(fd), addr.as_ptr(), addr.len()).build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
-        Op::new(Self { addr }, receiver, waker, data_drop)
+        Op::new(Self { addr }, receiver, data_drop)
     }
 }
 
@@ -35,8 +35,8 @@ impl Completable for Connect {
         Ok(())
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        self.addr as _
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(self.addr as _)
     }
 }
 

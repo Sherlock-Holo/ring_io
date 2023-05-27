@@ -44,11 +44,11 @@ impl<T: IoBufMut> RecvFrom<T> {
         data.msg.msg_namelen = mem::size_of::<libc::sockaddr_storage>() as _;
 
         let entry = opcode::RecvMsg::new(Fd(fd), &mut data.msg as *mut _).build();
-        let (operation, receiver, waker, data_drop) = Operation::new();
+        let (operation, receiver, data_drop) = Operation::new();
 
         with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
 
-        Op::new(Self { data }, receiver, waker, data_drop)
+        Op::new(Self { data }, receiver, data_drop)
     }
 }
 
@@ -90,8 +90,8 @@ impl<T: IoBufMut> Completable for RecvFrom<T> {
         }
     }
 
-    fn data_drop(self) -> Box<dyn Droppable> {
-        Box::new(self.data)
+    fn data_drop(self) -> Option<Box<dyn Droppable>> {
+        Some(Box::new(self.data))
     }
 }
 

@@ -16,7 +16,7 @@ pub struct Driver {
 
 impl Driver {
     pub fn new(task_receiver: Receiver<Runnable>) -> io::Result<Self> {
-        let ring = IoUring::new(256)?;
+        let ring = IoUring::new(256).unwrap();
         let ops = Slab::new();
 
         Ok(Self {
