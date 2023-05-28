@@ -26,7 +26,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
+    pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
         self.driver.submit(entry, operation)
     }
 }

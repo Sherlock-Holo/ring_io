@@ -8,6 +8,6 @@ pub mod net;
 pub mod op;
 pub mod opcode;
 mod operation;
-mod runtime;
+pub mod runtime;
 
 pub type BufResult<T, B> = (std::io::Result<T>, B);
