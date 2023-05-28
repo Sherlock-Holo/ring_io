@@ -11,6 +11,7 @@ use crate::op::Op;
 use crate::opcode::{Close, Connect, Read, Write};
 use crate::runtime::{in_ring_io_context, spawn};
 
+#[derive(Debug)]
 pub struct TcpStream {
     fd: RawFd,
 }

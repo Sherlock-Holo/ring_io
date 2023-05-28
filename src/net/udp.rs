@@ -11,6 +11,7 @@ use crate::op::Op;
 use crate::opcode::{self, Close, Connect, Recv, RecvFrom, SendTo};
 use crate::runtime::{in_ring_io_context, spawn};
 
+#[derive(Debug)]
 pub struct UdpSocket {
     fd: RawFd,
 }

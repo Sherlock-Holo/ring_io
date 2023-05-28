@@ -8,6 +8,7 @@ use crate::op::Op;
 use crate::opcode::{Close, Read, Write};
 use crate::runtime::{in_ring_io_context, spawn};
 
+#[derive(Debug)]
 pub struct File {
     fd: RawFd,
 }

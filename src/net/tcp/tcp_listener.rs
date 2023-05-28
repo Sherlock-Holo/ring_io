@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -6,7 +7,7 @@ use std::os::raw::c_int;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, Stream};
 use socket2::{Domain, SockAddr, Socket, Type};
 
 use crate::fd_trait;
@@ -15,6 +16,7 @@ use crate::op::Op;
 use crate::opcode::{self, Close};
 use crate::runtime::{in_ring_io_context, spawn};
 
+#[derive(Debug)]
 pub struct TcpListener {
     fd: RawFd,
 }
@@ -69,8 +71,55 @@ impl Drop for TcpListener {
     }
 }
 
+#[derive(Debug)]
+pub struct TcpListenerStream {
+    listener: TcpListener,
+    fut: Option<Accept>,
+}
+
+impl TcpListenerStream {
+    pub fn into_listener(self) -> (TcpListener, Option<Accept>) {
+        (self.listener, self.fut)
+    }
+}
+
+impl From<TcpListener> for TcpListenerStream {
+    fn from(value: TcpListener) -> Self {
+        Self {
+            listener: value,
+            fut: None,
+        }
+    }
+}
+
+impl Stream for TcpListenerStream {
+    type Item = io::Result<TcpStream>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.fut.as_mut() {
+                None => {
+                    let accept = self.listener.accept();
+
+                    self.fut = Some(accept);
+                }
+
+                Some(fut) => {
+                    return Poll::Ready(Some(ready!(fut.poll_unpin(cx)).map(|(stream, _)| stream)));
+                }
+            }
+        }
+    }
+}
+
 pub struct Accept {
     op: Op<opcode::Accept>,
+}
+
+impl Debug for Accept {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Accept").finish_non_exhaustive()
+    }
 }
 
 impl Future for Accept {
