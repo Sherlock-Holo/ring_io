@@ -1,25 +1,21 @@
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{IntoRawFd, RawFd};
 use std::os::raw::c_int;
-use std::pin::Pin;
-use std::task::{ready, Context, Poll};
 
-use futures_util::FutureExt;
 use socket2::{Domain, SockAddr, Socket, Type};
 
+use crate::buf::{IoBuf, IoBufMut};
 use crate::fd_trait;
-use crate::net::tcp::TcpStream;
 use crate::op::Op;
-use crate::opcode::{self, Close};
+use crate::opcode::{self, Close, Connect, Recv, RecvFrom, SendTo};
 use crate::runtime::{in_ring_io_context, spawn};
 
-pub struct TcpListener {
+pub struct UdpSocket {
     fd: RawFd,
 }
 
-impl TcpListener {
+impl UdpSocket {
     pub fn bind(addr: SocketAddr) -> io::Result<Self> {
         let domain = if addr.is_ipv4() {
             Domain::IPV4
@@ -27,7 +23,7 @@ impl TcpListener {
             Domain::IPV6
         };
 
-        let socket_type = c_int::from(Type::STREAM) | libc::SOCK_CLOEXEC;
+        let socket_type = c_int::from(Type::DGRAM) | libc::SOCK_CLOEXEC;
         let socket = Socket::new(domain, socket_type.into(), None)?;
 
         socket.bind(&SockAddr::from(addr))?;
@@ -37,10 +33,24 @@ impl TcpListener {
         })
     }
 
-    pub fn accept(&self) -> Accept {
-        Accept {
-            op: opcode::Accept::new(self.fd),
-        }
+    pub fn connect(&self, addr: SocketAddr) -> Op<Connect> {
+        Connect::new(self.fd, addr)
+    }
+
+    pub fn send<B: IoBuf>(&self, buf: B) -> Op<opcode::Send<B>> {
+        opcode::Send::new(self.fd, buf)
+    }
+
+    pub fn recv<B: IoBufMut>(&self, buf: B) -> Op<Recv<B>> {
+        Recv::new(self.fd, buf)
+    }
+
+    pub fn send_to<B: IoBuf>(&self, buf: B, addr: SocketAddr) -> Op<SendTo<B>> {
+        SendTo::new(self.fd, buf, addr)
+    }
+
+    pub fn recv_from<B: IoBufMut>(&self, buf: B) -> Op<RecvFrom<B>> {
+        RecvFrom::new(self.fd, buf)
     }
 
     pub fn close(&mut self) -> Op<Close> {
@@ -51,9 +61,9 @@ impl TcpListener {
     }
 }
 
-fd_trait!(TcpListener);
+fd_trait!(UdpSocket);
 
-impl Drop for TcpListener {
+impl Drop for UdpSocket {
     fn drop(&mut self) {
         if self.fd == -1 {
             return;
@@ -66,20 +76,5 @@ impl Drop for TcpListener {
                 libc::close(self.fd);
             }
         }
-    }
-}
-
-pub struct Accept {
-    op: Op<opcode::Accept>,
-}
-
-impl Future for Accept {
-    type Output = io::Result<(TcpStream, SocketAddr)>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (fd, addr) = ready!(self.op.poll_unpin(cx))?;
-
-        // Safety: fd is valid
-        unsafe { Poll::Ready(Ok((TcpStream::from_raw_fd(fd), addr))) }
     }
 }

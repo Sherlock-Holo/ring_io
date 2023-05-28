@@ -1,21 +1,40 @@
-use std::ffi::CString;
-use std::io::{Error, ErrorKind, Result};
-use std::os::unix::ffi::OsStrExt;
+use std::io;
 use std::path::Path;
 
-pub use copy::copy;
-pub use file::{read, write, File, OpenOptions, Sync};
-pub use metadata::{metadata, symlink_metadata, FileType, Metadata, Permissions};
-pub use remove::{remove_dir, remove_file};
-pub use rename::rename;
+pub use file::File;
+pub use open_options::OpenOptions;
 
-mod copy;
 mod file;
-mod metadata;
-mod remove;
-mod rename;
+mod open_options;
 
-fn path_to_cstring<P: AsRef<Path>>(path: P) -> Result<CString> {
-    CString::new(path.as_ref().as_os_str().as_bytes())
-        .map_err(|err| Error::new(ErrorKind::InvalidInput, err))
+pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path).await?;
+    let mut data = vec![];
+    let mut buf = vec![0; 4096];
+
+    loop {
+        let result = file.read(buf).await;
+        buf = result.1;
+        let n = result.0?;
+        if n == 0 {
+            break;
+        }
+
+        data.extend_from_slice(&buf[..n])
+    }
+
+    let _ = file.close().await;
+
+    Ok(data)
+}
+
+pub async fn create<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .await?;
+    let _ = file.close().await;
+
+    Ok(())
 }

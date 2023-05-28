@@ -1,6 +1,4 @@
-//! TCP utility types
-
-pub use tcp_listener::{Accept, Incoming, TcpListener};
+pub use tcp_listener::{Accept, TcpListener};
 pub use tcp_stream::TcpStream;
 
 mod tcp_listener;
