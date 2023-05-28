@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 
@@ -13,6 +14,12 @@ pub struct NotSeekable;
 pub struct RingFd<T: AsRawFd, S> {
     fd: T,
     _phantom_data: PhantomData<S>,
+}
+
+impl<T: AsRawFd + Debug, S> Debug for RingFd<T, S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RingFd").field("fd", &self.fd).finish()
+    }
 }
 
 impl<T: AsRawFd, S> RingFd<T, S> {
