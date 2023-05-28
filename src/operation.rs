@@ -27,15 +27,17 @@ impl OperationResult {
 
 pub struct Operation {
     result_sender: Sender<OperationResult>,
-    data: Arc<Mutex<Option<Box<dyn Droppable>>>>,
+    _data: Arc<Mutex<Option<Box<dyn Droppable>>>>,
 }
 
+pub type OperationNew = (
+    Operation,
+    Receiver<OperationResult>,
+    Weak<Mutex<Option<Box<dyn Droppable>>>>,
+);
+
 impl Operation {
-    pub fn new() -> (
-        Self,
-        Receiver<OperationResult>,
-        Weak<Mutex<Option<Box<dyn Droppable>>>>,
-    ) {
+    pub fn new() -> OperationNew {
         let (result_sender, result_receiver) = flume::bounded(1);
         let data = Arc::new(Mutex::new(None));
         let weak = Arc::downgrade(&data);
@@ -43,7 +45,7 @@ impl Operation {
         (
             Self {
                 result_sender,
-                data,
+                _data: data,
             },
             result_receiver,
             weak,

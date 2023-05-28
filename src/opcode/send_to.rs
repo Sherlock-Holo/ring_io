@@ -14,9 +14,9 @@ use crate::BufResult;
 
 pub struct SendTo<T: IoBuf> {
     buffer: T,
-    io_slices: Vec<IoSlice<'static>>,
-    addr: Box<SockAddr>,
-    msg: Box<libc::msghdr>,
+    _io_slices: Vec<IoSlice<'static>>,
+    _addr: Box<SockAddr>,
+    _msg: Box<libc::msghdr>,
 }
 
 impl<T: IoBuf> SendTo<T> {
@@ -43,9 +43,9 @@ impl<T: IoBuf> SendTo<T> {
         Op::new(
             Self {
                 buffer: buf,
-                io_slices,
-                addr,
-                msg: msghdr,
+                _io_slices: io_slices,
+                _addr: addr,
+                _msg: msghdr,
             },
             receiver,
             data_drop,
