@@ -34,6 +34,12 @@ impl UdpSocket {
         })
     }
 
+    pub fn from_std(udp_socket: std::net::UdpSocket) -> Self {
+        Self {
+            fd: udp_socket.into_raw_fd(),
+        }
+    }
+
     pub fn connect(&self, addr: SocketAddr) -> Op<Connect> {
         Connect::new(self.fd, addr)
     }

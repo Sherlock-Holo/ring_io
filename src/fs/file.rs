@@ -18,6 +18,12 @@ impl File {
         OpenOptions::new().read(true).open(path).await
     }
 
+    pub fn from_std(file: std::fs::File) -> Self {
+        Self {
+            fd: file.into_raw_fd(),
+        }
+    }
+
     pub fn read<B: IoBufMut>(&self, buf: B) -> Op<Read<B>> {
         Read::new(self.fd, buf, u64::MAX)
     }

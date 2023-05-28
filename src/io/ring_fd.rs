@@ -15,6 +15,12 @@ pub struct RingFd<T: AsRawFd, S> {
     _phantom_data: PhantomData<S>,
 }
 
+impl<T: AsRawFd, S> RingFd<T, S> {
+    pub fn into_inner(self) -> T {
+        self.fd
+    }
+}
+
 impl<T: AsRawFd> RingFd<T, Seekable> {
     pub fn new_seekable(fd: T) -> Self {
         Self {

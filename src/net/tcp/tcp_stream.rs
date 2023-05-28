@@ -26,6 +26,12 @@ impl TcpStream {
         })
     }
 
+    pub fn from_std(tcp_stream: std::net::TcpStream) -> Self {
+        Self {
+            fd: tcp_stream.into_raw_fd(),
+        }
+    }
+
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
         let domain = if addr.is_ipv4() {
             Domain::IPV4

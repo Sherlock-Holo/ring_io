@@ -39,6 +39,12 @@ impl TcpListener {
         })
     }
 
+    pub fn from_std(tcp_listener: std::net::TcpListener) -> Self {
+        Self {
+            fd: tcp_listener.into_raw_fd(),
+        }
+    }
+
     pub fn accept(&self) -> Accept {
         Accept {
             op: opcode::Accept::new(self.fd),
