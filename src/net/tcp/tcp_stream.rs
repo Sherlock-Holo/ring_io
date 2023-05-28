@@ -7,6 +7,7 @@ use socket2::{Domain, Socket, Type};
 
 use crate::buf::{IoBuf, IoBufMut};
 use crate::fd_trait;
+use crate::io::WriteAll;
 use crate::op::Op;
 use crate::opcode::{Close, Connect, Read, Write};
 use crate::runtime::{in_ring_io_context, spawn};
@@ -52,6 +53,10 @@ impl TcpStream {
 
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {
         Write::new(self.fd, buf, 0)
+    }
+
+    pub fn write_all<B: IoBuf>(&self, buf: B) -> WriteAll<B, Self> {
+        WriteAll::new(self, buf)
     }
 
     pub fn close(&mut self) -> Op<Close> {

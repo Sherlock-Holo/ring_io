@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::OpenOptions;
 use crate::buf::{IoBuf, IoBufMut};
+use crate::io::WriteAll;
 use crate::op::Op;
 use crate::opcode::{Close, Read, Write};
 use crate::runtime::{in_ring_io_context, spawn};
@@ -30,6 +31,10 @@ impl File {
 
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {
         Write::new(self.fd, buf, u64::MAX)
+    }
+
+    pub fn write_all<B: IoBuf>(&self, buf: B) -> WriteAll<B, Self> {
+        WriteAll::new(self, buf)
     }
 
     pub fn close(&mut self) -> Op<Close> {
