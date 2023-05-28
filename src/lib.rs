@@ -1,4 +1,4 @@
-pub use runtime::block_on;
+pub use runtime::{block_on, spawn};
 
 pub mod buf;
 mod driver;

@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use async_task::{Runnable, Task};
+use async_task::Runnable;
 use flume::{Receiver, Sender};
 use futures_util::task::noop_waker_ref;
 use futures_util::FutureExt;
@@ -14,6 +14,8 @@ use crate::driver::Driver;
 use crate::operation::Operation;
 
 static TX_RX: Lazy<(Sender<Runnable>, Receiver<Runnable>)> = Lazy::new(flume::unbounded);
+
+pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
     static RUNTIME: std::cell::RefCell<Option<Runtime>> = std::cell::RefCell::new(None);
