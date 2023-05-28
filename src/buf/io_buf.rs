@@ -103,6 +103,34 @@ unsafe impl IoBuf for Vec<u8> {
     }
 }
 
+unsafe impl IoBuf for Box<[u8]> {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.bytes_init()
+    }
+}
+
+unsafe impl IoBuf for String {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_bytes().as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.bytes_init()
+    }
+}
+
 unsafe impl IoBuf for &'static [u8] {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
