@@ -8,6 +8,8 @@ use flume::{Receiver, Sender};
 use futures_util::task::noop_waker_ref;
 use futures_util::FutureExt;
 use io_uring::squeue::Entry;
+pub use io_uring::Builder;
+use io_uring::IoUring;
 use once_cell::sync::Lazy;
 
 use crate::driver::Driver;
@@ -36,8 +38,16 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    block_on_with_io_uring_builder(fut, &create_io_uring_builder())
+}
+
+pub fn block_on_with_io_uring_builder<F>(fut: F, builder: &Builder) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     let task_receiver = TX_RX.1.clone();
-    let driver = Driver::new(task_receiver).unwrap();
+    let driver = Driver::new_with_io_uring_builder(task_receiver, builder).unwrap();
 
     let driver = RUNTIME.with(|runtime| {
         let driver = Arc::new(driver);
@@ -81,6 +91,10 @@ where
     runnable.schedule();
 
     task
+}
+
+pub fn create_io_uring_builder() -> Builder {
+    IoUring::builder()
 }
 
 pub(crate) fn in_ring_io_context() -> bool {

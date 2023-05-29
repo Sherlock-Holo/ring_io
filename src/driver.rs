@@ -6,7 +6,7 @@ use async_task::Runnable;
 use flume::Receiver;
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
-use io_uring::IoUring;
+use io_uring::{Builder, IoUring};
 use slab::Slab;
 
 use crate::operation::{Operation, OperationResult};
@@ -17,8 +17,12 @@ pub struct Driver {
 }
 
 impl Driver {
-    pub fn new(task_receiver: Receiver<Runnable>) -> io::Result<Self> {
-        let ring = IoUring::new(256).unwrap();
+    pub fn new_with_io_uring_builder(
+        task_receiver: Receiver<Runnable>,
+        builder: &Builder,
+    ) -> io::Result<Self> {
+        let ring = builder.build(256)?;
+
         let ops = Slab::new();
 
         Ok(Self {
