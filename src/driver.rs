@@ -1,9 +1,11 @@
 use std::sync::Mutex;
+use std::time::Duration;
 use std::{io, thread};
 
 use async_task::Runnable;
 use flume::Receiver;
 use io_uring::squeue::Entry;
+use io_uring::types::{SubmitArgs, Timespec};
 use io_uring::IoUring;
 use slab::Slab;
 
@@ -54,16 +56,22 @@ impl Driver {
 
         let mut ring = self.ring.lock().unwrap();
         let ring = &mut *ring;
-        ring.ring.submit()?;
+
+        let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
+        let submit_args = SubmitArgs::new().timespec(&timespec);
+        match ring.ring.submitter().submit_with_args(1, &submit_args) {
+            Err(err) if err.raw_os_error() == Some(libc::ETIME) => {
+                thread::yield_now();
+
+                return Ok(());
+            }
+
+            Err(err) => return Err(err),
+            Ok(_) => {}
+        }
 
         let mut completion_queue = ring.ring.completion();
         completion_queue.sync();
-
-        if completion_queue.is_empty() {
-            thread::yield_now();
-
-            return Ok(());
-        }
 
         for cqe in completion_queue {
             let user_data = cqe.user_data();
