@@ -39,8 +39,16 @@ impl Driver {
         let user_data = ring.ops.insert(operation);
         entry = entry.user_data(user_data as _);
 
+        ring.ring.submission().sync();
+
         // Safety: we will make sure related resource won't be released before operation done
-        unsafe { while ring.ring.submission().push(&entry).is_err() {} }
+        unsafe {
+            while ring.ring.submission().push(&entry).is_err() {
+                ring.ring.submit()?;
+
+                ring.ring.submission().sync();
+            }
+        }
 
         ring.ring.submit()?;
 
