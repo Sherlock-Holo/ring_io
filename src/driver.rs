@@ -43,18 +43,12 @@ impl Driver {
         let user_data = ring.ops.insert(operation);
         entry = entry.user_data(user_data as _);
 
-        ring.ring.submission().sync();
-
         // Safety: we will make sure related resource won't be released before operation done
         unsafe {
             while ring.ring.submission().push(&entry).is_err() {
                 ring.ring.submit()?;
-
-                ring.ring.submission().sync();
             }
         }
-
-        ring.ring.submit()?;
 
         Ok(user_data as _)
     }
@@ -69,7 +63,7 @@ impl Driver {
         let mut ring = self.ring.lock().unwrap();
         let ring = &mut *ring;
 
-        let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
+        let timespec = Timespec::new().nsec(Duration::from_millis(50).as_nanos() as _);
         let submit_args = SubmitArgs::new().timespec(&timespec);
         match ring.ring.submitter().submit_with_args(1, &submit_args) {
             Err(err) if err.raw_os_error() == Some(libc::ETIME) => {
@@ -82,9 +76,7 @@ impl Driver {
             Ok(_) => {}
         }
 
-        let mut completion_queue = ring.ring.completion();
-        completion_queue.sync();
-
+        let completion_queue = ring.ring.completion();
         for cqe in completion_queue {
             let user_data = cqe.user_data();
             let op = &mut ring.ops[user_data as _];
