@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use async_task::Runnable;
@@ -24,7 +24,7 @@ thread_local! {
 }
 
 pub struct Runtime {
-    driver: Arc<Driver>,
+    driver: Rc<Driver>,
 }
 
 impl Runtime {
@@ -46,13 +46,18 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let task_receiver = TX_RX.1.clone();
-    let driver = Driver::new_with_io_uring_builder(task_receiver, builder).unwrap();
-
     let driver = RUNTIME.with(|runtime| {
-        let driver = Arc::new(driver);
+        let mut runtime = runtime.borrow_mut();
+        if runtime.is_some() {
+            panic!("can't call block_on nested");
+        }
 
-        *runtime.borrow_mut() = Some(Runtime {
+        let task_receiver = TX_RX.1.clone();
+        let driver = Driver::new_with_io_uring_builder(task_receiver, builder).unwrap();
+
+        let driver = Rc::new(driver);
+
+        *runtime = Some(Runtime {
             driver: driver.clone(),
         });
 

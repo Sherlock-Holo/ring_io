@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::cell::RefCell;
 use std::time::Duration;
 use std::{io, thread};
 
@@ -12,7 +12,7 @@ use slab::Slab;
 use crate::operation::{Operation, OperationResult};
 
 pub struct Driver {
-    ring: Mutex<DriverRing>,
+    ring: RefCell<DriverRing>,
     task_receiver: Receiver<Runnable>,
 }
 
@@ -26,7 +26,7 @@ impl Driver {
         let ops = Slab::new();
 
         Ok(Self {
-            ring: Mutex::new(DriverRing { ring, ops }),
+            ring: RefCell::new(DriverRing { ring, ops }),
             task_receiver,
         })
     }
@@ -39,7 +39,7 @@ struct DriverRing {
 
 impl Driver {
     pub fn submit(&self, mut entry: Entry, operation: Operation) -> io::Result<u64> {
-        let mut ring = self.ring.lock().unwrap();
+        let mut ring = self.ring.borrow_mut();
         let user_data = ring.ops.insert(operation);
         entry = entry.user_data(user_data as _);
 
@@ -57,10 +57,12 @@ impl Driver {
         const MAX_TASK_ONCE: usize = 64;
 
         for task in self.task_receiver.try_iter().take(MAX_TASK_ONCE) {
+            // here task may call Runtime::submit, which call Driver::submit, it borrow_mut the
+            // self.ring
             task.run();
         }
 
-        let mut ring = self.ring.lock().unwrap();
+        let mut ring = self.ring.borrow_mut();
         let ring = &mut *ring;
 
         let timespec = Timespec::new().nsec(Duration::from_millis(50).as_nanos() as _);
