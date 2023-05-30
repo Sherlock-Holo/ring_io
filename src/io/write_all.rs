@@ -11,7 +11,7 @@ use crate::BufResult;
 
 pub struct WriteAll<'a, B: IoBuf, T: sealed::Writable> {
     io: &'a T,
-    buf: Option<Slice<B>>,
+    buf: Option<B>,
     fut: Option<Op<Write<Slice<B>>>>,
     count: usize,
 }
@@ -20,7 +20,7 @@ impl<'a, B: IoBuf, T: sealed::Writable> WriteAll<'a, B, T> {
     pub(crate) fn new(io: &'a T, buf: B) -> Self {
         Self {
             io,
-            buf: Some(buf.slice(..)),
+            buf: Some(buf),
             fut: None,
             count: 0,
         }
@@ -37,11 +37,11 @@ impl<'a, B: IoBuf, T: sealed::Writable> Future for WriteAll<'a, B, T> {
             match this.fut.as_mut() {
                 None => {
                     let buf = this.buf.take().unwrap();
-                    if buf.is_empty() {
-                        return Poll::Ready((Ok(this.count), buf.into_inner()));
+                    if buf.bytes_init() == this.count {
+                        return Poll::Ready((Ok(this.count), buf));
                     }
 
-                    this.fut.replace(this.io.write_buf(buf));
+                    this.fut.replace(this.io.write_buf(buf.slice(this.count..)));
                 }
 
                 Some(fut) => {
@@ -53,7 +53,7 @@ impl<'a, B: IoBuf, T: sealed::Writable> Future for WriteAll<'a, B, T> {
 
                         Ok(n) => {
                             this.count += n;
-                            this.buf.replace(buf.into_inner().slice(this.count..));
+                            this.buf.replace(buf.into_inner());
                             this.fut.take();
                         }
                     }

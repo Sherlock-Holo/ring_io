@@ -1,9 +1,10 @@
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{IntoRawFd, RawFd};
 use std::path::Path;
 
 use super::OpenOptions;
 use crate::buf::{IoBuf, IoBufMut};
+use crate::fd_trait;
 use crate::io::WriteAll;
 use crate::op::Op;
 use crate::opcode::{Close, Read, Write};
@@ -17,6 +18,25 @@ pub struct File {
 impl File {
     pub async fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         OpenOptions::new().read(true).open(path).await
+    }
+
+    pub async fn create<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .await
+    }
+
+    pub async fn create_new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .truncate(true)
+            .open(path)
+            .await
     }
 
     pub fn from_std(file: std::fs::File) -> Self {
@@ -61,39 +81,4 @@ impl Drop for File {
     }
 }
 
-impl FromRawFd for File {
-    unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        Self { fd }
-    }
-}
-
-impl AsRawFd for File {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
-    }
-}
-
-impl IntoRawFd for File {
-    fn into_raw_fd(mut self) -> RawFd {
-        let fd = self.fd;
-
-        // make sure don't close fd
-        self.fd = -1;
-
-        fd
-    }
-}
-
-impl From<File> for OwnedFd {
-    fn from(value: File) -> Self {
-        // Safety: fd is valid
-        unsafe { OwnedFd::from_raw_fd(value.into_raw_fd()) }
-    }
-}
-
-impl AsFd for File {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        // Safety: fd is valid
-        unsafe { BorrowedFd::borrow_raw(self.fd) }
-    }
-}
+fd_trait!(File);

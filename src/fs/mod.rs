@@ -32,19 +32,46 @@ pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 }
 
 pub async fn write<P: AsRef<Path>, B: IoBuf>(path: P, data: B) -> BufResult<usize, B> {
-    match OpenOptions::new().write(true).open(path).await {
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await
+    {
         Err(err) => (Err(err), data),
         Ok(file) => file.write_all(data).await,
     }
 }
 
-pub async fn create<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .await?;
-    let _ = file.close().await;
+#[cfg(test)]
+mod tests {
+    use std::env::temp_dir;
+    use std::io::Write;
 
-    Ok(())
+    use tempfile::NamedTempFile;
+
+    use super::*;
+    use crate::block_on;
+
+    #[test]
+    fn test_write() {
+        block_on(async move {
+            let dir = temp_dir();
+            let path = dir.join("test.txt");
+
+            assert_eq!(write(&path, "test").await.0.unwrap(), 4);
+            assert_eq!(std::fs::read(path).unwrap(), b"test");
+        })
+    }
+
+    #[test]
+    fn test_read() {
+        block_on(async move {
+            let mut file = NamedTempFile::new().unwrap();
+            file.write_all(b"test").unwrap();
+
+            assert_eq!(read(file.path()).await.unwrap(), b"test");
+        })
+    }
 }
