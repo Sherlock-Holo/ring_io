@@ -23,6 +23,7 @@ impl Open {
 
         let entry = opcode::OpenAt::new(Fd(libc::AT_FDCWD), path.as_ptr())
             .flags(flags)
+            .mode(options.mode)
             .build();
         let (operation, receiver, data_drop) = Operation::new();
 
