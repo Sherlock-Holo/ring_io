@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::runtime::with_runtime_context;
 
 pub struct Close {
     _priv: (),
@@ -17,7 +17,7 @@ impl Close {
         let entry = opcode::Close::new(Fd(fd)).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
 
         Op::new(Self { _priv: () }, receiver, data_drop)
     }

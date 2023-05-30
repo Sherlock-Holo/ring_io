@@ -11,7 +11,7 @@ use socket2::SockAddr;
 use crate::buf::IoBufMut;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::runtime::with_runtime_context;
 use crate::BufResult;
 
 pub struct RecvFrom<T: IoBufMut> {
@@ -46,7 +46,7 @@ impl<T: IoBufMut> RecvFrom<T> {
         let entry = opcode::RecvMsg::new(Fd(fd), &mut data.msg as *mut _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
 
         Op::new(Self { data }, receiver, data_drop)
     }

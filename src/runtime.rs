@@ -1,35 +1,120 @@
 use std::future::Future;
-use std::io;
-use std::rc::Rc;
+use std::num::NonZeroUsize;
 use std::task::{Context, Poll};
+use std::thread::{available_parallelism, JoinHandle};
+use std::{io, thread};
 
-use async_task::Runnable;
-use flume::{Receiver, Sender};
+use async_task::{Runnable, Schedule};
+use flume::Sender;
 use futures_util::task::noop_waker_ref;
 use futures_util::FutureExt;
 use io_uring::squeue::Entry;
-pub use io_uring::Builder;
-use io_uring::IoUring;
-use once_cell::sync::Lazy;
+use io_uring::{Builder, IoUring};
 
-use crate::driver::Driver;
+use crate::driver::{Driver, WorkerDriver};
 use crate::operation::Operation;
-
-static TX_RX: Lazy<(Sender<Runnable>, Receiver<Runnable>)> = Lazy::new(flume::unbounded);
 
 pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
-    static RUNTIME: std::cell::RefCell<Option<Runtime>> = std::cell::RefCell::new(None);
+    static CONTEXT: std::cell::RefCell<Option<RuntimeContext>> = std::cell::RefCell::new(None);
 }
 
 pub struct Runtime {
-    driver: Rc<Driver>,
+    driver: Driver,
+    threads: Vec<JoinHandle<()>>,
+    close_notify: Option<Sender<()>>,
+}
+
+pub(crate) struct RuntimeContext {
+    worker_driver: WorkerDriver,
+    task_sender: Sender<Runnable>,
+}
+
+impl RuntimeContext {
+    pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
+        Ok(self.worker_driver.submit(entry, operation))
+    }
 }
 
 impl Runtime {
-    pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
-        self.driver.submit(entry, operation)
+    pub fn new() -> io::Result<Self> {
+        let threads = available_parallelism()
+            .unwrap_or(NonZeroUsize::new(4).unwrap())
+            .get();
+        Self::new_with_io_uring_builder(&IoUring::builder(), threads)
+    }
+
+    pub fn new_with_io_uring_builder(builder: &Builder, threads: usize) -> io::Result<Self> {
+        let io_uring = builder.build(1024)?;
+        let (task_sender, task_receiver) = flume::unbounded();
+        let (close_notify, close_notified) = flume::bounded(0);
+        let driver = Driver::new(io_uring, task_receiver);
+
+        // create worker threads
+        let threads = (0..threads - 1)
+            .map(|_| {
+                let worker_driver = driver.worker_driver(close_notified.clone());
+                let runtime_context = RuntimeContext {
+                    worker_driver: worker_driver.clone(),
+                    task_sender: task_sender.clone(),
+                };
+
+                thread::spawn(move || {
+                    CONTEXT.with(|context| context.borrow_mut().replace(runtime_context));
+
+                    // worker run task
+                    worker_driver.worker_thread_run();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let runtime_context = RuntimeContext {
+            worker_driver: driver.worker_driver(close_notified),
+            task_sender,
+        };
+
+        // let main worker thread, also the IO thread can spawn thread too
+        CONTEXT.with(|context| context.borrow_mut().replace(runtime_context));
+
+        Ok(Self {
+            driver,
+            threads,
+            close_notify: Some(close_notify),
+        })
+    }
+
+    pub fn block_on<F>(&mut self, fut: F) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let (runnable, mut task) = async_task::spawn(fut, get_scheduler());
+        runnable.schedule();
+
+        loop {
+            self.driver
+                .main_thread_run()
+                .unwrap_or_else(|err| panic!("driver panic {err}"));
+
+            if task.is_finished() {
+                match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
+                    Poll::Ready(output) => return output,
+                    Poll::Pending => unreachable!("finished task return pending"),
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        CONTEXT.with(|context| context.borrow_mut().take());
+        self.close_notify.take();
+
+        for join_handle in self.threads.drain(..) {
+            let _ = join_handle.join();
+        }
     }
 }
 
@@ -38,53 +123,7 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    block_on_with_io_uring_builder(fut, &create_io_uring_builder())
-}
-
-pub fn block_on_with_io_uring_builder<F>(fut: F, builder: &Builder) -> F::Output
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let driver = RUNTIME.with(|runtime| {
-        let mut runtime = runtime.borrow_mut();
-        if runtime.is_some() {
-            panic!("can't call block_on nested");
-        }
-
-        let task_receiver = TX_RX.1.clone();
-        let driver = Driver::new_with_io_uring_builder(task_receiver, builder).unwrap();
-
-        let driver = Rc::new(driver);
-
-        *runtime = Some(Runtime {
-            driver: driver.clone(),
-        });
-
-        driver
-    });
-
-    let (runnable, mut task) = async_task::spawn(fut, schedule);
-    runnable.schedule();
-
-    let output = loop {
-        driver
-            .run()
-            .unwrap_or_else(|err| panic!("driver panic {err}"));
-
-        if task.is_finished() {
-            match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
-                Poll::Ready(output) => break output,
-                Poll::Pending => unreachable!("finished task return pending"),
-            }
-        }
-    };
-
-    RUNTIME.with(|runtime| {
-        runtime.borrow_mut().take();
-    });
-
-    output
+    Runtime::new().unwrap().block_on(fut)
 }
 
 pub fn spawn<F>(fut: F) -> Task<F::Output>
@@ -92,7 +131,7 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let (runnable, task) = async_task::spawn(fut, schedule);
+    let (runnable, task) = async_task::spawn(fut, get_scheduler());
     runnable.schedule();
 
     task
@@ -102,28 +141,34 @@ pub fn create_io_uring_builder() -> Builder {
     IoUring::builder()
 }
 
-pub(crate) fn in_ring_io_context() -> bool {
-    RUNTIME.with(|runtime| runtime.borrow().is_some())
+fn get_scheduler() -> impl Schedule + Send + Sync + 'static {
+    let task_sender = CONTEXT.with(|context| {
+        context
+            .borrow()
+            .as_ref()
+            .expect("not in ring io context")
+            .task_sender
+            .clone()
+    });
+
+    move |runnable| task_sender.send(runnable).unwrap()
 }
 
-pub(crate) fn with_runtime<T, F: FnOnce(&Runtime) -> T>(f: F) -> T {
-    RUNTIME.with(|runtime| {
-        let runtime = runtime.borrow();
-        let runtime = runtime.as_ref().expect("runtime not init");
+pub(crate) fn with_runtime_context<T, F: FnOnce(&RuntimeContext) -> T>(f: F) -> T {
+    CONTEXT.with(|context| {
+        let context = context.borrow();
+        let context = context.as_ref().expect("not in ring io context");
 
-        f(runtime)
+        f(context)
     })
 }
 
-fn schedule(runnable: Runnable) {
-    TX_RX.0.send(runnable).unwrap();
+pub(crate) fn in_ring_io_context() -> bool {
+    CONTEXT.with(|context| context.borrow().as_ref().is_some())
 }
 
-// all test must create a new thread, because block_on can't call nested
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
-    use std::thread;
     use std::time::{Duration, Instant};
 
     use futures_timer::Delay;
@@ -166,20 +211,5 @@ mod tests {
 
         let duration = start.elapsed();
         assert_eq!(duration.as_secs(), 1);
-    }
-
-    #[test]
-    fn multi_thread() {
-        thread::spawn(|| block_on(pending::<()>()));
-
-        block_on(async move {
-            let tasks = (0..10)
-                .map(|_| spawn(async move { Delay::new(Duration::from_secs(1)).await }))
-                .collect::<Vec<_>>();
-
-            for task in tasks {
-                task.await;
-            }
-        })
     }
 }

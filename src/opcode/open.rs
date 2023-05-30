@@ -8,7 +8,7 @@ use io_uring::types::Fd;
 use crate::fs::OpenOptions;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::runtime::with_runtime_context;
 
 pub struct Open {
     path: CString,
@@ -27,7 +27,7 @@ impl Open {
             .build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
 
         Ok(Op::new(Self { path }, receiver, data_drop))
     }

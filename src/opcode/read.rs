@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 use crate::buf::IoBufMut;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::runtime::with_runtime_context;
 use crate::BufResult;
 
 pub struct Read<T: IoBufMut> {
@@ -20,7 +20,7 @@ impl<T: IoBufMut> Read<T> {
             .build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
 
         Op::new(Self { buffer: buf }, receiver, data_drop)
     }
