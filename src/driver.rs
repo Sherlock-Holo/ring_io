@@ -21,8 +21,7 @@ impl Driver {
         task_receiver: Receiver<Runnable>,
         builder: &Builder,
     ) -> io::Result<Self> {
-        let ring = builder.build(256)?;
-
+        let ring = builder.build(1024)?;
         let ops = Slab::new();
 
         Ok(Self {
@@ -54,7 +53,7 @@ impl Driver {
     }
 
     pub fn run(&self) -> io::Result<()> {
-        const MAX_TASK_ONCE: usize = 64;
+        const MAX_TASK_ONCE: usize = 61;
 
         for task in self.task_receiver.try_iter().take(MAX_TASK_ONCE) {
             // here task may call Runtime::submit, which call Driver::submit, it borrow_mut the
@@ -65,7 +64,7 @@ impl Driver {
         let mut ring = self.ring.borrow_mut();
         let ring = &mut *ring;
 
-        let timespec = Timespec::new().nsec(Duration::from_millis(50).as_nanos() as _);
+        let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
         let submit_args = SubmitArgs::new().timespec(&timespec);
         match ring.ring.submitter().submit_with_args(1, &submit_args) {
             Err(err) if err.raw_os_error() == Some(libc::ETIME) => {
