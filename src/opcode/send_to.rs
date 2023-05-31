@@ -79,14 +79,14 @@ mod tests {
 
     #[test]
     fn test_udp_send_to() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-        let client_addr = client.local_addr().unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+            let client_addr = client.local_addr().unwrap();
+
             let fd = server.as_raw_fd();
 
             let data = Vec::from("test");

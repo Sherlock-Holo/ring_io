@@ -60,10 +60,10 @@ mod tests {
 
     #[test]
     fn test_file_read() {
-        let book = fs::read("testdata/book.txt").unwrap();
-        let file = File::open("testdata/book.txt").unwrap();
-
         block_on(async move {
+            let book = fs::read("testdata/book.txt").unwrap();
+            let file = File::open("testdata/book.txt").unwrap();
+
             let fd = file.as_raw_fd();
             let mut offset = 0;
             let mut data = vec![];
@@ -88,18 +88,19 @@ mod tests {
 
     #[test]
     fn test_socket_read() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let join_handle = thread::spawn(move || listener.accept().unwrap().0);
-
-        let mut tcp1 = TcpStream::connect(addr).unwrap();
-        let tcp2 = join_handle.join().unwrap();
-
-        tcp1.write_all(b"test").unwrap();
-
-        let fd = tcp2.as_raw_fd();
         block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let join_handle = thread::spawn(move || listener.accept().unwrap().0);
+
+            let mut tcp1 = TcpStream::connect(addr).unwrap();
+            let tcp2 = join_handle.join().unwrap();
+
+            tcp1.write_all(b"test").unwrap();
+
+            let fd = tcp2.as_raw_fd();
+
             let buf = vec![0; 4];
 
             let (result, buf) = Read::new(fd, buf, 0).await;

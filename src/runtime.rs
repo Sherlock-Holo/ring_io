@@ -9,7 +9,8 @@ use flume::Sender;
 use futures_util::task::noop_waker_ref;
 use futures_util::FutureExt;
 use io_uring::squeue::Entry;
-use io_uring::{Builder, IoUring};
+pub use io_uring::Builder;
+use io_uring::IoUring;
 
 use crate::driver::{Driver, WorkerDriver};
 use crate::operation::Operation;

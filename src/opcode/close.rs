@@ -40,7 +40,7 @@ mod tests {
     use std::fs::File;
     use std::io::{ErrorKind, Read};
     use std::net::{TcpListener, TcpStream};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::IntoRawFd;
     use std::thread;
 
     use super::*;
@@ -50,7 +50,7 @@ mod tests {
     fn test_close_file() {
         block_on(async move {
             let file = File::open("testdata/book.txt").unwrap();
-            let fd = file.as_raw_fd();
+            let fd = file.into_raw_fd();
 
             Close::new(fd).await.unwrap();
         })
@@ -65,7 +65,7 @@ mod tests {
 
         let tcp1 = TcpStream::connect(addr).unwrap();
         let mut tcp2 = join_handle.join().unwrap();
-        let fd = tcp1.as_raw_fd();
+        let fd = tcp1.into_raw_fd();
 
         block_on(async move {
             Close::new(fd).await.unwrap();
@@ -78,7 +78,7 @@ mod tests {
     fn test_close_tcp_listener() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let fd = listener.as_raw_fd();
+        let fd = listener.into_raw_fd();
 
         block_on(async move {
             Close::new(fd).await.unwrap();

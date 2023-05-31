@@ -105,16 +105,16 @@ mod tests {
 
     #[test]
     fn test_udp_recv_from() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-        let client_addr = client.local_addr().unwrap();
-
-        client.send(b"test").unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+            let client_addr = client.local_addr().unwrap();
+
+            client.send(b"test").unwrap();
+
             let fd = server.as_raw_fd();
             let buf = vec![0; 4];
 

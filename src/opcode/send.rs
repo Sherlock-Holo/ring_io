@@ -50,15 +50,15 @@ mod tests {
 
     #[test]
     fn test_tcp_send() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let join_handle = thread::spawn(move || listener.accept().unwrap().0);
-
-        let tcp1 = TcpStream::connect(addr).unwrap();
-        let mut tcp2 = join_handle.join().unwrap();
-
         block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let join_handle = thread::spawn(move || listener.accept().unwrap().0);
+
+            let tcp1 = TcpStream::connect(addr).unwrap();
+            let mut tcp2 = join_handle.join().unwrap();
+
             let fd = tcp1.as_raw_fd();
 
             let (result, _) = Send::new(fd, b"test").await;
@@ -73,13 +73,13 @@ mod tests {
 
     #[test]
     fn test_udp_send() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+
             let fd = client.as_raw_fd();
 
             let (result, _) = Send::new(fd, b"test".as_slice()).await;
