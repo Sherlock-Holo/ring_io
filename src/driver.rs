@@ -78,13 +78,12 @@ impl Driver {
 
         let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
         let submit_args = SubmitArgs::new().timespec(&timespec);
-        match self.io.ring.submitter().submit_with_args(1, &submit_args) {
-            Err(err) if err.raw_os_error() == Some(libc::ETIME) => {
+        if let Err(err) = self.io.ring.submitter().submit_with_args(1, &submit_args) {
+            if matches!(err.raw_os_error(), Some(libc::ETIME) | Some(libc::EINTR)) {
                 return Ok(());
             }
 
-            Err(err) => return Err(err),
-            Ok(_) => {}
+            return Err(err);
         }
 
         let completion_queue = self.io.ring.completion();
