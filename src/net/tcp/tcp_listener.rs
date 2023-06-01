@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::io;
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_int;
@@ -32,7 +33,9 @@ impl TcpListener {
         let socket_type = c_int::from(Type::STREAM) | libc::SOCK_CLOEXEC;
         let socket = Socket::new(domain, socket_type.into(), None)?;
 
+        socket.set_reuse_address(true)?;
         socket.bind(&SockAddr::from(addr))?;
+        socket.listen(128)?;
 
         Ok(Self {
             fd: socket.into_raw_fd(),
@@ -49,6 +52,13 @@ impl TcpListener {
         Accept {
             op: opcode::Accept::new(self.fd),
         }
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let std_listener =
+            ManuallyDrop::new(unsafe { std::net::TcpListener::from_raw_fd(self.fd) });
+
+        std_listener.local_addr()
     }
 
     pub fn close(&mut self) -> Op<Close> {
@@ -136,5 +146,32 @@ impl Future for Accept {
 
         // Safety: fd is valid
         unsafe { Poll::Ready(Ok((TcpStream::from_raw_fd(fd), addr))) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_on;
+
+    #[test]
+    fn test() {
+        block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let task = spawn(async move { listener.accept().await.unwrap().0 });
+
+            let stream1 = TcpStream::connect(addr).await.unwrap();
+            let stream2 = task.await;
+
+            assert_eq!(stream1.write_all(b"test").await.0.unwrap(), 4);
+
+            let buf = vec![0; 4];
+            let (result, buf) = stream2.read(buf).await;
+            assert_eq!(result.unwrap(), 4);
+
+            assert_eq!(buf, b"test");
+        });
     }
 }
