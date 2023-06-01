@@ -16,6 +16,7 @@ flume = "0.10"
 slab = "0.4"
 bytes = "1"
 socket2 = "0.5"
+sharded-slab = "0.1"
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false }

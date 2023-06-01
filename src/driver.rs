@@ -1,5 +1,6 @@
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::yield_now;
 use std::time::Duration;
 
 use async_task::Runnable;
@@ -7,12 +8,12 @@ use flume::{Receiver, Selector, Sender};
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
 use io_uring::IoUring;
-use slab::Slab;
+use sharded_slab::Slab;
 
 use crate::operation::{Operation, OperationResult};
 
 pub struct Driver {
-    ops: Arc<Mutex<Slab<Operation>>>,
+    ops: Arc<Slab<Operation>>,
     sqe_buff: Sender<Entry>,
     task_receiver: Receiver<Runnable>,
     io: DriverIo,
@@ -38,7 +39,7 @@ impl Driver {
         let (sqe_buff, sqe_consume) = flume::unbounded();
 
         Self {
-            ops: Arc::new(Mutex::new(Default::default())),
+            ops: Arc::new(Default::default()),
             sqe_buff,
             task_receiver,
             io: DriverIo {
@@ -87,15 +88,15 @@ impl Driver {
         }
 
         let completion_queue = self.io.ring.completion();
-        let mut ops = self.ops.lock().unwrap();
         for cqe in completion_queue {
             let user_data = cqe.user_data();
-            let op = &mut ops[user_data as _];
+            let op = match self.ops.take(user_data as _) {
+                None => continue,
+                Some(op) => op,
+            };
 
             let operation_result = OperationResult::new(&cqe);
             op.send_result(operation_result);
-
-            ops.remove(user_data as _);
         }
 
         Ok(())
@@ -104,7 +105,7 @@ impl Driver {
 
 #[derive(Clone)]
 pub struct WorkerDriver {
-    ops: Arc<Mutex<Slab<Operation>>>,
+    ops: Arc<Slab<Operation>>,
     sqe_buff: Sender<Entry>,
     task_receiver: Receiver<Runnable>,
     close_notified: Receiver<()>,
@@ -112,12 +113,22 @@ pub struct WorkerDriver {
 
 impl WorkerDriver {
     pub fn submit(&self, mut entry: Entry, operation: Operation) -> u64 {
-        let user_data = self.ops.lock().unwrap().insert(operation);
-        entry = entry.user_data(user_data as _);
+        let vacant = loop {
+            match self.ops.vacant_entry() {
+                None => {
+                    yield_now();
+                }
+                Some(vacant) => break vacant,
+            }
+        };
+
+        let user_data = vacant.key() as _;
+        entry = entry.user_data(user_data);
+        vacant.insert(operation);
 
         self.sqe_buff.send(entry).unwrap();
 
-        user_data as _
+        user_data
     }
 
     pub fn worker_thread_run(self) {
