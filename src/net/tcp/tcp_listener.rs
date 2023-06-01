@@ -32,7 +32,9 @@ impl TcpListener {
         let socket_type = c_int::from(Type::STREAM) | libc::SOCK_CLOEXEC;
         let socket = Socket::new(domain, socket_type.into(), None)?;
 
+        socket.set_reuse_address(true)?;
         socket.bind(&SockAddr::from(addr))?;
+        socket.listen(128)?;
 
         Ok(Self {
             fd: socket.into_raw_fd(),
