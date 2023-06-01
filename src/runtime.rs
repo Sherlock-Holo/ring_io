@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::task::{Context, Poll};
@@ -18,11 +19,11 @@ use crate::operation::Operation;
 pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
-    static CONTEXT: std::cell::RefCell<Option<RuntimeContext>> = std::cell::RefCell::new(None);
+    pub(crate) static CONTEXT: RefCell<Option<RuntimeContext>> = RefCell::new(None);
 }
 
 pub struct Runtime {
-    driver: Driver,
+    driver: Option<Driver>,
     threads: Vec<JoinHandle<()>>,
     close_notify: Option<Sender<()>>,
 }
@@ -43,7 +44,7 @@ impl Runtime {
         let threads = available_parallelism()
             .unwrap_or(NonZeroUsize::new(4).unwrap())
             .get();
-        Self::new_with_io_uring_builder(&IoUring::builder(), threads)
+        Self::new_with_io_uring_builder(IoUring::builder().dontfork(), threads)
     }
 
     pub fn new_with_io_uring_builder(builder: &Builder, threads: usize) -> io::Result<Self> {
@@ -79,7 +80,7 @@ impl Runtime {
         CONTEXT.with(|context| context.borrow_mut().replace(runtime_context));
 
         Ok(Self {
-            driver,
+            driver: Some(driver),
             threads,
             close_notify: Some(close_notify),
         })
@@ -87,24 +88,42 @@ impl Runtime {
 
     pub fn block_on<F>(&mut self, fut: F) -> F::Output
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+        F: Future + 'static,
+        F::Output: 'static,
     {
-        let (runnable, mut task) = async_task::spawn(fut, get_scheduler());
+        let mut driver = self.driver.take().expect("nested block_on");
+
+        let (stop_handle, stop_notify) = flume::bounded(0);
+        let (runnable_sender, runnable_receiver) = flume::unbounded();
+        let (runnable, mut task) =
+            async_task::spawn_local(fut, move |runnable| runnable_sender.send(runnable).unwrap());
         runnable.schedule();
 
-        loop {
-            self.driver
-                .main_thread_run()
-                .unwrap_or_else(|err| panic!("driver panic {err}"));
+        let driver_thread = thread::spawn(|| {
+            driver.main_thread_run_loop(stop_notify);
+
+            driver
+        });
+
+        for runnable in runnable_receiver {
+            runnable.run();
 
             if task.is_finished() {
-                match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
-                    Poll::Ready(output) => return output,
-                    Poll::Pending => unreachable!("finished task return pending"),
-                }
+                break;
             }
         }
+
+        let output = match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
+            Poll::Ready(output) => output,
+            Poll::Pending => unreachable!(),
+        };
+
+        drop(stop_handle);
+
+        let driver = driver_thread.join().unwrap();
+        self.driver.replace(driver);
+
+        output
     }
 }
 

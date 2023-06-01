@@ -1,10 +1,12 @@
-use std::io;
+use std::io::Error;
 use std::sync::Arc;
+use std::thread;
 use std::thread::yield_now;
 use std::time::Duration;
 
 use async_task::Runnable;
 use flume::{Receiver, Selector, Sender};
+use io_uring::opcode::Nop;
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
 use io_uring::IoUring;
@@ -21,7 +23,6 @@ pub struct Driver {
 
 struct DriverIo {
     ring: IoUring,
-    pending_sqe: Option<Entry>,
     sqe_consume: Receiver<Entry>,
 }
 
@@ -42,65 +43,128 @@ impl Driver {
             ops: Arc::new(Default::default()),
             sqe_buff,
             task_receiver,
-            io: DriverIo {
-                ring,
-                pending_sqe: None,
-                sqe_consume,
-            },
+            io: DriverIo { ring, sqe_consume },
         }
     }
 
-    pub fn main_thread_run(&mut self) -> io::Result<()> {
-        const MAX_TASK_ONCE: usize = 61;
+    pub fn main_thread_run_loop(&mut self, stop_notify: Receiver<()>) {
+        const STOP: u64 = u64::MAX - 1;
 
-        for task in self.task_receiver.try_iter().take(MAX_TASK_ONCE) {
-            task.run();
-        }
+        thread::scope(|scope| {
+            let ring = &self.io.ring;
+            let sqe_consume = &self.io.sqe_consume;
 
-        let buff_sqes = self
-            .io
-            .pending_sqe
-            .take()
-            .into_iter()
-            .chain(self.io.sqe_consume.try_iter());
-        for sqe in buff_sqes {
-            unsafe {
-                if self.io.ring.submission().push(&sqe).is_err() {
-                    self.io.ring.submit()?;
+            let sq_push_thread = scope.spawn(move || {
+                let mut pending_sqe = None;
+                loop {
+                    // Safety: we use sq only this thread
+                    let mut sq = unsafe { ring.submission_shared() };
 
-                    if self.io.ring.submission().push(&sqe).is_err() {
-                        self.io.pending_sqe.replace(sqe);
+                    if let Some(sqe) = pending_sqe.take() {
+                        if unsafe { sq.push(&sqe).is_err() } {
+                            pending_sqe.replace(sqe);
 
-                        break;
+                            match ring.submit() {
+                                Err(err) => {
+                                    if submit_err_can_ignore(&err) {
+                                        continue;
+                                    }
+
+                                    panic!("submit panic {err}");
+                                }
+
+                                Ok(_) => continue,
+                            }
+                        }
+                    }
+
+                    let sqe = match Selector::new()
+                        .recv(&stop_notify, |result| match result {
+                            Ok(_) => unreachable!(),
+                            Err(_) => None,
+                        })
+                        .recv(sqe_consume, |result| result.ok())
+                        .wait()
+                    {
+                        None => {
+                            let stop_sqe = Nop::new().build().user_data(STOP);
+
+                            loop {
+                                sq.sync();
+
+                                if unsafe { sq.push(&stop_sqe).is_ok() } {
+                                    if let Err(err) = ring.submit() {
+                                        if !submit_err_can_ignore(&err) {
+                                            panic!("submit panic {err}");
+                                        }
+                                    }
+
+                                    return;
+                                }
+
+                                if let Err(err) = ring.submit() {
+                                    if submit_err_can_ignore(&err) {
+                                        continue;
+                                    }
+
+                                    panic!("submit panic {err}");
+                                }
+                            }
+                        }
+                        Some(sqe) => sqe,
+                    };
+
+                    if unsafe { sq.push(&sqe).is_err() } {
+                        pending_sqe.replace(sqe);
+                    }
+
+                    if let Err(err) = ring.submit() {
+                        if !submit_err_can_ignore(&err) {
+                            panic!("submit panic {err}");
+                        }
                     }
                 }
+            });
+
+            let ops = &self.ops;
+            let cq_consume_thread = scope.spawn(move || loop {
+                let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
+                let args = SubmitArgs::new().timespec(&timespec);
+                if let Err(err) = ring.submitter().submit_with_args(1, &args) {
+                    if submit_err_can_ignore(&err) {
+                        continue;
+                    }
+
+                    panic!("submit panic {err}");
+                }
+
+                // Safety: we only use cq this thread
+                let cq = unsafe { ring.completion_shared() };
+                for cqe in cq {
+                    let user_data = cqe.user_data();
+                    if user_data == STOP {
+                        return;
+                    }
+
+                    let op = match ops.take(user_data as _) {
+                        None => continue,
+                        Some(op) => op,
+                    };
+
+                    let operation_result = OperationResult::new(&cqe);
+                    op.send_result(operation_result);
+                }
+            });
+
+            for join_handle in [sq_push_thread, cq_consume_thread] {
+                join_handle.join().unwrap();
             }
-        }
-
-        let timespec = Timespec::new().nsec(Duration::from_millis(10).as_nanos() as _);
-        let submit_args = SubmitArgs::new().timespec(&timespec);
-        if let Err(err) = self.io.ring.submitter().submit_with_args(1, &submit_args) {
-            if matches!(err.raw_os_error(), Some(libc::ETIME) | Some(libc::EINTR)) {
-                return Ok(());
-            }
-
-            return Err(err);
-        }
-
-        let completion_queue = self.io.ring.completion();
-        for cqe in completion_queue {
-            let user_data = cqe.user_data();
-            let op = match self.ops.take(user_data as _) {
-                None => continue,
-                Some(op) => op,
-            };
-
-            let operation_result = OperationResult::new(&cqe);
-            op.send_result(operation_result);
-        }
-
-        Ok(())
+        })
     }
+}
+
+fn submit_err_can_ignore(err: &Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ETIME) | Some(libc::EINTR))
 }
 
 #[derive(Clone)]
