@@ -5,10 +5,11 @@ use std::os::raw::c_int;
 
 use socket2::{Domain, Socket, Type};
 
-use crate::buf::{IoBuf, IoBufMut};
+use crate::buf::{FixedSizeBufRing, IoBuf, IoBufMut};
 use crate::fd_trait;
 use crate::io::WriteAll;
 use crate::op::Op;
+use crate::opcode::read_with_ring_buf::ReadWithBufRing;
 use crate::opcode::{Close, Connect, Read, Write};
 use crate::runtime::{in_ring_io_context, spawn};
 
@@ -49,6 +50,10 @@ impl TcpStream {
 
     pub fn read<B: IoBufMut>(&self, buf: B) -> Op<Read<B>> {
         Read::new(self.fd, buf, 0)
+    }
+
+    pub fn read_with_buf_ring(&self, buf_ring: FixedSizeBufRing) -> Op<ReadWithBufRing> {
+        ReadWithBufRing::new(self.fd, buf_ring, 0)
     }
 
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::task::{Context, Poll};
@@ -10,7 +11,7 @@ use futures_util::task::noop_waker_ref;
 use futures_util::FutureExt;
 use io_uring::squeue::Entry;
 pub use io_uring::Builder;
-use io_uring::IoUring;
+use io_uring::{IoUring, Submitter};
 
 use crate::driver::{Driver, WorkerDriver};
 use crate::operation::Operation;
@@ -18,7 +19,7 @@ use crate::operation::Operation;
 pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
-    static CONTEXT: std::cell::RefCell<Option<RuntimeContext>> = std::cell::RefCell::new(None);
+    static CONTEXT: RefCell<Option<RuntimeContext>> = RefCell::new(None);
 }
 
 pub struct Runtime {
@@ -35,6 +36,10 @@ pub(crate) struct RuntimeContext {
 impl RuntimeContext {
     pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
         Ok(self.worker_driver.submit(entry, operation))
+    }
+
+    pub(crate) fn submitter(&self) -> Submitter {
+        self.worker_driver.submitter()
     }
 }
 

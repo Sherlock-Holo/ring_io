@@ -5,10 +5,13 @@ use std::sync::{Arc, Mutex, Weak};
 use flume::{Receiver, Sender};
 use io_uring::cqueue::Entry;
 
+use crate::buf::{FixedSizeBufRing, GBuf};
+
 #[derive(Debug)]
 pub struct OperationResult {
     pub result: io::Result<i32>,
     pub flags: u32,
+    pub g_buf: Option<GBuf>,
 }
 
 impl OperationResult {
@@ -21,11 +24,16 @@ impl OperationResult {
             Ok(result)
         };
 
-        Self { result, flags }
+        Self {
+            result,
+            flags,
+            g_buf: None,
+        }
     }
 }
 
 pub struct Operation {
+    buf_ring: Option<FixedSizeBufRing>,
     result_sender: Sender<OperationResult>,
     _data: Arc<Mutex<Option<Box<dyn Droppable>>>>,
 }
@@ -44,6 +52,7 @@ impl Operation {
 
         (
             Self {
+                buf_ring: None,
                 result_sender,
                 _data: data,
             },
@@ -52,7 +61,30 @@ impl Operation {
         )
     }
 
-    pub fn send_result(&self, result: OperationResult) {
+    pub fn new_with_buf_ring(buf_ring: FixedSizeBufRing) -> OperationNew {
+        let (result_sender, result_receiver) = flume::bounded(1);
+        let data = Arc::new(Mutex::new(None));
+        let weak = Arc::downgrade(&data);
+
+        (
+            Self {
+                buf_ring: Some(buf_ring),
+                result_sender,
+                _data: data,
+            },
+            result_receiver,
+            weak,
+        )
+    }
+
+    pub fn send_result(&self, mut result: OperationResult) {
+        if let Some(buf_ring) = &self.buf_ring {
+            if let Ok(res) = &result.result {
+                let g_buf = buf_ring.get_buf(*res as _, result.flags);
+                result.g_buf.replace(g_buf);
+            }
+        }
+
         let _ = self.result_sender.try_send(result);
     }
 }

@@ -1,6 +1,6 @@
 use std::ops;
 
-use super::Slice;
+use super::{GBuf, Slice};
 
 /// An `io-uring` compatible buffer.
 ///
@@ -198,5 +198,19 @@ unsafe impl IoBuf for bytes::BytesMut {
 
     fn bytes_total(&self) -> usize {
         self.capacity()
+    }
+}
+
+unsafe impl IoBuf for GBuf {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.len()
     }
 }

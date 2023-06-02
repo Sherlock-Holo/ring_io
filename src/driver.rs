@@ -7,7 +7,7 @@ use async_task::Runnable;
 use flume::{Receiver, Selector, Sender};
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
-use io_uring::IoUring;
+use io_uring::{IoUring, Submitter};
 use sharded_slab::Slab;
 
 use crate::operation::{Operation, OperationResult};
@@ -20,7 +20,7 @@ pub struct Driver {
 }
 
 struct DriverIo {
-    ring: IoUring,
+    ring: Arc<IoUring>,
     pending_sqe: Option<Entry>,
     sqe_consume: Receiver<Entry>,
 }
@@ -32,6 +32,7 @@ impl Driver {
             sqe_buff: self.sqe_buff.clone(),
             task_receiver: self.task_receiver.clone(),
             close_notified,
+            ring: self.io.ring.clone(),
         }
     }
 
@@ -43,7 +44,7 @@ impl Driver {
             sqe_buff,
             task_receiver,
             io: DriverIo {
-                ring,
+                ring: Arc::new(ring),
                 pending_sqe: None,
                 sqe_consume,
             },
@@ -64,11 +65,12 @@ impl Driver {
             .into_iter()
             .chain(self.io.sqe_consume.try_iter());
         for sqe in buff_sqes {
+            // Safety: we use sq only in main/io thread
             unsafe {
-                if self.io.ring.submission().push(&sqe).is_err() {
+                if self.io.ring.submission_shared().push(&sqe).is_err() {
                     self.io.ring.submit()?;
 
-                    if self.io.ring.submission().push(&sqe).is_err() {
+                    if self.io.ring.submission_shared().push(&sqe).is_err() {
                         self.io.pending_sqe.replace(sqe);
 
                         break;
@@ -87,7 +89,8 @@ impl Driver {
             return Err(err);
         }
 
-        let completion_queue = self.io.ring.completion();
+        // Safety: we use cq only in main/io thread
+        let completion_queue = unsafe { self.io.ring.completion_shared() };
         for cqe in completion_queue {
             let user_data = cqe.user_data();
             let op = match self.ops.take(user_data as _) {
@@ -109,6 +112,7 @@ pub struct WorkerDriver {
     sqe_buff: Sender<Entry>,
     task_receiver: Receiver<Runnable>,
     close_notified: Receiver<()>,
+    ring: Arc<IoUring>,
 }
 
 impl WorkerDriver {
@@ -142,5 +146,9 @@ impl WorkerDriver {
         {
             task.run();
         }
+    }
+
+    pub fn submitter(&self) -> Submitter {
+        self.ring.submitter()
     }
 }
