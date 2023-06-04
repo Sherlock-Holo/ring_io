@@ -61,8 +61,12 @@ impl Operation {
         )
     }
 
-    pub fn new_with_buf_ring(buf_ring: FixedSizeBufRing) -> OperationNew {
-        let (result_sender, result_receiver) = flume::bounded(1);
+    pub fn new_with_buf_ring(buf_ring: FixedSizeBufRing, multi_shot: bool) -> OperationNew {
+        let (result_sender, result_receiver) = if multi_shot {
+            flume::unbounded()
+        } else {
+            flume::bounded(1)
+        };
         let data = Arc::new(Mutex::new(None));
         let weak = Arc::downgrade(&data);
 

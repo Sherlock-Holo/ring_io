@@ -8,7 +8,7 @@ use std::sync::Arc;
 use io_uring::types::BufRingEntry;
 use io_uring::{cqueue, Submitter};
 
-use crate::runtime::with_runtime_context;
+use crate::runtime::{in_ring_io_context, with_runtime_context};
 
 type Bgid = u16;
 // Buffer group id
@@ -244,7 +244,19 @@ impl InnerBufRing {
         // the same BufRing but wrapped in Rc<_> so the wrapped buf_ring can be passed to the
         // outgoing GBuf.
 
-        let bid = cqueue::buffer_select(flags).unwrap();
+        // let bid = cqueue::buffer_select(flags).unwrap();
+        let bid = match cqueue::buffer_select(flags) {
+            None => {
+                // recv with buf_select can't get bid
+                if res == 0 {
+                    return GBuf::new_empty(buf_ring);
+                }
+
+                panic!("bid not found")
+            }
+
+            Some(bid) => bid,
+        };
         let len = res as usize;
 
         assert!(len <= self.buf_len);
@@ -313,12 +325,15 @@ impl InnerBufRing {
 
 impl Drop for InnerBufRing {
     fn drop(&mut self) {
-        with_runtime_context(|context| {
-            let _ = self.unregister(&context.submitter());
-        })
+        if in_ring_io_context() {
+            with_runtime_context(|context| {
+                let _ = self.unregister(&context.submitter());
+            })
+        }
     }
 }
 
+/// if not in ring_io context, drop the [`FixedSizeBufRing`] may not unregister it
 #[derive(Clone)]
 pub struct FixedSizeBufRing {
     // The BufRing is reference counted because each buffer handed out has a reference back to its
@@ -441,7 +456,7 @@ impl Builder {
 pub struct GBuf {
     bufgroup: FixedSizeBufRing,
     len: usize,
-    bid: Bid,
+    bid: Option<Bid>,
 }
 
 impl fmt::Debug for GBuf {
@@ -459,7 +474,19 @@ impl GBuf {
     fn new(bufgroup: FixedSizeBufRing, bid: Bid, len: usize) -> Self {
         assert!(len <= bufgroup.rc.buf_len);
 
-        Self { bufgroup, len, bid }
+        Self {
+            bufgroup,
+            len,
+            bid: Some(bid),
+        }
+    }
+
+    fn new_empty(bufgroup: FixedSizeBufRing) -> Self {
+        Self {
+            bufgroup,
+            len: 0,
+            bid: None,
+        }
     }
 
     // A few methods are kept here despite not being used for unit tests yet. They show a little
@@ -485,8 +512,13 @@ impl GBuf {
 
     /// Return a byte slice reference.
     pub fn as_slice(&self) -> &[u8] {
-        let p = self.bufgroup.rc.stable_ptr(self.bid);
-        unsafe { std::slice::from_raw_parts(p, self.len) }
+        match self.bid {
+            None => &[],
+            Some(bid) => {
+                let p = self.bufgroup.rc.stable_ptr(bid);
+                unsafe { std::slice::from_raw_parts(p, self.len) }
+            }
+        }
     }
 }
 
@@ -500,8 +532,10 @@ impl Deref for GBuf {
 
 impl Drop for GBuf {
     fn drop(&mut self) {
-        // Add the buffer back to the bufgroup, for the kernel to reuse.
-        unsafe { self.bufgroup.rc.dropping_bid(self.bid) };
+        if let Some(bid) = self.bid {
+            // Add the buffer back to the bufgroup, for the kernel to reuse.
+            unsafe { self.bufgroup.rc.dropping_bid(bid) }
+        }
     }
 }
 

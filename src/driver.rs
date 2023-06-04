@@ -7,7 +7,7 @@ use async_task::Runnable;
 use flume::{Receiver, Selector, Sender};
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
-use io_uring::{IoUring, Submitter};
+use io_uring::{cqueue, IoUring, Submitter};
 use sharded_slab::Slab;
 
 use crate::operation::{Operation, OperationResult};
@@ -93,13 +93,17 @@ impl Driver {
         let completion_queue = unsafe { self.io.ring.completion_shared() };
         for cqe in completion_queue {
             let user_data = cqe.user_data();
-            let op = match self.ops.take(user_data as _) {
+            match self.ops.get(user_data as _) {
                 None => continue,
-                Some(op) => op,
-            };
+                Some(op) => {
+                    let operation_result = OperationResult::new(&cqe);
+                    op.send_result(operation_result);
+                }
+            }
 
-            let operation_result = OperationResult::new(&cqe);
-            op.send_result(operation_result);
+            if !cqueue::more(cqe.flags()) {
+                self.ops.remove(user_data as _);
+            }
         }
 
         Ok(())
