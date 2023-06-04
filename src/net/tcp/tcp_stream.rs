@@ -1,17 +1,16 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr};
 use std::os::fd::{IntoRawFd, RawFd};
 use std::os::raw::c_int;
 
 use socket2::{Domain, Socket, Type};
 
 use crate::buf::{FixedSizeBufRing, IoBuf, IoBufMut};
-use crate::fd_trait;
 use crate::io::WriteAll;
 use crate::op::Op;
-use crate::opcode::read_with_ring_buf::ReadWithBufRing;
-use crate::opcode::{Close, Connect, Read, Write};
+use crate::opcode::{Close, Connect, Read, ReadWithBufRing, Write};
 use crate::runtime::{in_ring_io_context, spawn};
+use crate::{fd_trait, opcode};
 
 #[derive(Debug)]
 pub struct TcpStream {
@@ -62,6 +61,19 @@ impl TcpStream {
 
     pub fn write_all<B: IoBuf>(&self, buf: B) -> WriteAll<B, Self> {
         WriteAll::new(self, buf)
+    }
+
+    pub fn shutdown(&mut self, how: Shutdown) -> Op<opcode::Shutdown> {
+        let fd = if how == Shutdown::Both {
+            let fd = self.fd;
+            self.fd = -1;
+
+            fd
+        } else {
+            self.fd
+        };
+
+        opcode::Shutdown::new(fd, how)
     }
 
     pub fn close(&mut self) -> Op<Close> {
