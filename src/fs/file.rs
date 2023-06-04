@@ -7,8 +7,7 @@ use crate::buf::{FixedSizeBufRing, IoBuf, IoBufMut};
 use crate::fd_trait;
 use crate::io::WriteAll;
 use crate::op::Op;
-use crate::opcode::read_with_ring_buf::ReadWithBufRing;
-use crate::opcode::{Close, Read, Write};
+use crate::opcode::{Close, Read, ReadWithBufRing, Write};
 use crate::runtime::{in_ring_io_context, spawn};
 
 #[derive(Debug)]

@@ -22,7 +22,8 @@ impl ReadWithBufRing {
             .buf_group(buf_ring.buf_group())
             .build()
             .flags(Flags::BUFFER_SELECT);
-        let (operation, receiver, data_drop) = Operation::new_with_buf_ring(buf_ring.clone());
+        let (operation, receiver, data_drop) =
+            Operation::new_with_buf_ring(buf_ring.clone(), false);
 
         with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
 
