@@ -352,6 +352,10 @@ impl FixedSizeBufRing {
         }
     }
 
+    pub fn builder(b_gid: Bgid) -> Builder {
+        Builder::new(b_gid)
+    }
+
     pub fn buf_len(&self) -> usize {
         self.rc.buf_len
     }

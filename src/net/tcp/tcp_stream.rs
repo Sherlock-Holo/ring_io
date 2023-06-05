@@ -1,14 +1,15 @@
 use std::io;
+use std::mem::ManuallyDrop;
 use std::net::{Shutdown, SocketAddr};
-use std::os::fd::{IntoRawFd, RawFd};
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_int;
 
 use socket2::{Domain, Socket, Type};
 
 use crate::buf::{FixedSizeBufRing, IoBuf, IoBufMut};
 use crate::io::WriteAll;
-use crate::op::Op;
-use crate::opcode::{Close, Connect, Read, ReadWithBufRing, Write};
+use crate::op::{MultiOp, Op};
+use crate::opcode::{Close, Connect, Read, ReadWithBufRing, RecvMulti, Write};
 use crate::runtime::{in_ring_io_context, spawn};
 use crate::{fd_trait, opcode};
 
@@ -55,6 +56,10 @@ impl TcpStream {
         ReadWithBufRing::new(self.fd, buf_ring, 0)
     }
 
+    pub fn recv_multi(&self, buf_ring: FixedSizeBufRing) -> MultiOp<RecvMulti> {
+        RecvMulti::new(self.fd, buf_ring)
+    }
+
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {
         Write::new(self.fd, buf, 0)
     }
@@ -63,17 +68,20 @@ impl TcpStream {
         WriteAll::new(self, buf)
     }
 
-    pub fn shutdown(&mut self, how: Shutdown) -> Op<opcode::Shutdown> {
-        let fd = if how == Shutdown::Both {
-            let fd = self.fd;
-            self.fd = -1;
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let std_stream = ManuallyDrop::new(unsafe { std::net::TcpStream::from_raw_fd(self.fd) });
 
-            fd
-        } else {
-            self.fd
-        };
+        std_stream.local_addr()
+    }
 
-        opcode::Shutdown::new(fd, how)
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        let std_stream = ManuallyDrop::new(unsafe { std::net::TcpStream::from_raw_fd(self.fd) });
+
+        std_stream.peer_addr()
+    }
+
+    pub fn shutdown(&self, how: Shutdown) -> Op<opcode::Shutdown> {
+        opcode::Shutdown::new(self.fd, how)
     }
 
     pub fn close(&mut self) -> Op<Close> {
