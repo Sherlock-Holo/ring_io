@@ -1,93 +1,81 @@
-use std::cell::RefCell;
 use std::future::Future;
 use std::num::NonZeroUsize;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::{available_parallelism, JoinHandle};
 use std::{io, thread};
 
-use async_task::{Runnable, Schedule};
 use flume::Sender;
-use futures_util::task::noop_waker_ref;
-use futures_util::FutureExt;
-use io_uring::squeue::Entry;
-pub use io_uring::Builder;
-use io_uring::{IoUring, Submitter};
+use io_uring::{Builder, IoUring};
+use rand::prelude::{thread_rng, SliceRandom};
 
-use crate::driver::{Driver, WorkerDriver};
-use crate::operation::Operation;
+use crate::buf;
+use crate::per_thread::runtime::{PerThreadRuntime, TaskReceive};
+
+const ENTRIES: u32 = 1024;
 
 pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
-    static CONTEXT: RefCell<Option<RuntimeContext>> = RefCell::new(None);
+    static WORKER_SENDERS: OnceLock<Arc<[Sender<TaskReceive>]>> = OnceLock::new();
 }
 
 pub struct Runtime {
-    driver: Driver,
-    threads: Vec<JoinHandle<()>>,
-    close_notify: Option<Sender<()>>,
+    worker_senders: Arc<[Sender<TaskReceive>]>,
+    shutdown: Arc<AtomicBool>,
+    worker_threads: Vec<JoinHandle<()>>,
 }
 
-pub(crate) struct RuntimeContext {
-    worker_driver: WorkerDriver,
-    task_sender: Sender<Runnable>,
-}
-
-impl RuntimeContext {
-    pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
-        Ok(self.worker_driver.submit(entry, operation))
-    }
-
-    pub(crate) fn submitter(&self) -> Submitter {
-        self.worker_driver.submitter()
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Runtime {
-    pub fn new() -> io::Result<Self> {
+    pub fn new() -> Self {
         let threads = available_parallelism()
             .unwrap_or(NonZeroUsize::new(4).unwrap())
             .get();
-        Self::new_with_io_uring_builder(&IoUring::builder(), threads)
+
+        Self::new_with(IoUring::builder(), threads)
     }
 
-    pub fn new_with_io_uring_builder(builder: &Builder, threads: usize) -> io::Result<Self> {
-        let io_uring = builder.build(1024)?;
-        let (task_sender, task_receiver) = flume::unbounded();
-        let (close_notify, close_notified) = flume::bounded(0);
-        let driver = Driver::new(io_uring, task_receiver);
+    pub fn new_with(builder: Builder, threads: usize) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker_threads = Vec::with_capacity(threads);
 
-        // create worker threads
-        let threads = (0..threads - 1)
-            .map(|_| {
-                let worker_driver = driver.worker_driver(close_notified.clone());
-                let runtime_context = RuntimeContext {
-                    worker_driver: worker_driver.clone(),
-                    task_sender: task_sender.clone(),
-                };
+        let mut worker_senders = Vec::with_capacity(threads);
+        let mut task_receivers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let (sender, receiver) = flume::unbounded();
+            worker_senders.push(sender);
+            task_receivers.push(receiver);
+        }
 
-                thread::spawn(move || {
-                    CONTEXT.with(|context| context.borrow_mut().replace(runtime_context));
+        let worker_senders: Arc<[Sender<TaskReceive>]> = worker_senders.into();
 
-                    // worker run task
-                    worker_driver.worker_thread_run();
-                })
-            })
-            .collect::<Vec<_>>();
+        for task_receiver in task_receivers {
+            let mut per_thread_runtime =
+                PerThreadRuntime::new(builder.clone(), ENTRIES, task_receiver);
+            let shutdown = shutdown.clone();
+            let worker_senders = worker_senders.clone();
 
-        let runtime_context = RuntimeContext {
-            worker_driver: driver.worker_driver(close_notified),
-            task_sender,
-        };
+            let join_handle = thread::spawn(move || {
+                WORKER_SENDERS.with(|senders| {
+                    let _ = senders.set(worker_senders);
+                });
 
-        // let main worker thread, also the IO thread can spawn thread too
-        CONTEXT.with(|context| context.borrow_mut().replace(runtime_context));
+                per_thread_runtime.run(shutdown)
+            });
+            worker_threads.push(join_handle);
+        }
 
-        Ok(Self {
-            driver,
-            threads,
-            close_notify: Some(close_notify),
-        })
+        Self {
+            worker_senders,
+            shutdown,
+            worker_threads,
+        }
     }
 
     pub fn block_on<F>(&mut self, fut: F) -> F::Output
@@ -95,30 +83,32 @@ impl Runtime {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let (runnable, mut task) = async_task::spawn(fut, get_scheduler());
-        runnable.schedule();
+        let sender = self
+            .worker_senders
+            .choose(&mut thread_rng())
+            .unwrap()
+            .clone();
 
-        loop {
-            self.driver
-                .main_thread_run()
-                .unwrap_or_else(|err| panic!("driver panic {err}"));
+        let (output_sender, output_receiver) = flume::bounded(1);
+        inner_spawn(
+            async move {
+                let output = fut.await;
 
-            if task.is_finished() {
-                match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
-                    Poll::Ready(output) => return output,
-                    Poll::Pending => unreachable!("finished task return pending"),
-                }
-            }
-        }
+                let _ = output_sender.send(output);
+            },
+            sender,
+        )
+        .detach();
+
+        output_receiver.recv().unwrap()
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        CONTEXT.with(|context| context.borrow_mut().take());
-        self.close_notify.take();
+        self.shutdown.store(true, Ordering::Release);
 
-        for join_handle in self.threads.drain(..) {
+        for join_handle in self.worker_threads.drain(..) {
             let _ = join_handle.join();
         }
     }
@@ -129,7 +119,38 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    Runtime::new().unwrap().block_on(fut)
+    Runtime::new().block_on(fut)
+}
+
+pub async fn register_buf_ring(builder: buf::Builder) -> io::Result<()> {
+    let result_receivers = WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        let mut result_receivers = Vec::with_capacity(senders.len());
+        for sender in senders.iter() {
+            let (result_sender, result_receiver) = flume::bounded(1);
+            sender
+                .send(TaskReceive::RegisterBufRing(builder, result_sender))
+                .unwrap();
+            result_receivers.push(result_receiver);
+        }
+
+        result_receivers
+    });
+
+    for receiver in result_receivers {
+        receiver.recv_async().await.unwrap()?;
+    }
+
+    Ok(())
+}
+
+pub fn unregister_buf_ring(bgid: u16) {
+    WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        for sender in senders.iter() {
+            sender.send(TaskReceive::UnRegisterBufRing(bgid)).unwrap();
+        }
+    });
 }
 
 pub fn spawn<F>(fut: F) -> Task<F::Output>
@@ -137,40 +158,25 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let (runnable, task) = async_task::spawn(fut, get_scheduler());
+    let sender = WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        senders.choose(&mut thread_rng()).unwrap().clone()
+    });
+
+    inner_spawn(fut, sender)
+}
+
+fn inner_spawn<F>(fut: F, sender: Sender<TaskReceive>) -> Task<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (runnable, task) = async_task::spawn(fut, move |runnable| {
+        sender.send(TaskReceive::Runnable(runnable)).unwrap();
+    });
     runnable.schedule();
 
     task
-}
-
-pub fn create_io_uring_builder() -> Builder {
-    IoUring::builder()
-}
-
-fn get_scheduler() -> impl Schedule + Send + Sync + 'static {
-    let task_sender = CONTEXT.with(|context| {
-        context
-            .borrow()
-            .as_ref()
-            .expect("not in ring io context")
-            .task_sender
-            .clone()
-    });
-
-    move |runnable| task_sender.send(runnable).unwrap()
-}
-
-pub(crate) fn with_runtime_context<T, F: FnOnce(&RuntimeContext) -> T>(f: F) -> T {
-    CONTEXT.with(|context| {
-        let context = context.borrow();
-        let context = context.as_ref().expect("not in ring io context");
-
-        f(context)
-    })
-}
-
-pub(crate) fn in_ring_io_context() -> bool {
-    CONTEXT.with(|context| context.borrow().as_ref().is_some())
 }
 
 #[cfg(test)]

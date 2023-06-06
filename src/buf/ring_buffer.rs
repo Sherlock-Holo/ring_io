@@ -8,8 +8,6 @@ use std::sync::Arc;
 use io_uring::types::BufRingEntry;
 use io_uring::{cqueue, Submitter};
 
-use crate::runtime::{in_ring_io_context, with_runtime_context};
-
 type Bgid = u16;
 // Buffer group id
 type Bid = u16; // Buffer id
@@ -224,13 +222,13 @@ impl InnerBufRing {
         res
     }
 
-    // Unregister the buffer ring from the io_uring.
+    /*// Unregister the buffer ring from the io_uring.
     // Normally this is done automatically when the BufRing goes out of scope.
     fn unregister(&self, submitter: &Submitter) -> io::Result<()> {
         let bgid = self.bgid;
 
         submitter.unregister_buf_ring(bgid)
-    }
+    }*/
 
     // Returns the buffer group id.
     fn bgid(&self) -> Bgid {
@@ -323,15 +321,15 @@ impl InnerBufRing {
     }
 }
 
-impl Drop for InnerBufRing {
+/*impl Drop for InnerBufRing {
     fn drop(&mut self) {
-        if in_ring_io_context() {
-            with_runtime_context(|context| {
-                let _ = self.unregister(&context.submitter());
+        if in_per_thread_runtime() {
+            with_driver(|driver| {
+                let _ = self.unregister(&driver.submitter());
             })
         }
     }
-}
+}*/
 
 /// if not in ring_io context, drop the [`FixedSizeBufRing`] may not unregister it
 #[derive(Clone)]
@@ -342,7 +340,6 @@ pub struct FixedSizeBufRing {
 }
 
 unsafe impl Send for FixedSizeBufRing {}
-
 unsafe impl Sync for FixedSizeBufRing {}
 
 impl FixedSizeBufRing {
@@ -350,10 +347,6 @@ impl FixedSizeBufRing {
         FixedSizeBufRing {
             rc: Arc::new(buf_ring),
         }
-    }
-
-    pub fn builder(b_gid: Bgid) -> Builder {
-        Builder::new(b_gid)
     }
 
     pub fn buf_len(&self) -> usize {
@@ -366,6 +359,10 @@ impl FixedSizeBufRing {
 
     pub fn get_buf(&self, res: u32, flags: u32) -> GBuf {
         self.rc.get_buf(self.clone(), res, flags)
+    }
+
+    pub fn unregister(&self, submitter: &Submitter) -> io::Result<()> {
+        submitter.unregister_buf_ring(self.buf_group())
     }
 }
 
@@ -416,6 +413,10 @@ impl Builder {
         self
     }
 
+    pub(crate) fn bgid(&self) -> Bgid {
+        self.bgid
+    }
+
     // Return a FixedSizeBufRing.
     pub(crate) fn build_buf_ring(&self) -> io::Result<FixedSizeBufRing> {
         let mut b: Builder = *self;
@@ -446,10 +447,10 @@ impl Builder {
         Ok(FixedSizeBufRing::new(inner))
     }
 
-    pub fn build(&self) -> io::Result<FixedSizeBufRing> {
+    pub(crate) fn build(&self, submitter: &Submitter) -> io::Result<FixedSizeBufRing> {
         let buf_ring = self.build_buf_ring()?;
 
-        with_runtime_context(|context| buf_ring.rc.register(&context.submitter()))?;
+        buf_ring.rc.register(submitter)?;
 
         Ok(buf_ring)
     }
@@ -546,30 +547,25 @@ impl Drop for GBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{block_on, spawn};
+    use crate::block_on;
+    use crate::runtime::{register_buf_ring, unregister_buf_ring};
 
     #[test]
-    fn test_build() {
+    fn test_register() {
         block_on(async move {
-            Builder::new(1)
-                .buf_len(4096)
-                .ring_entries(10)
-                .build()
-                .unwrap();
+            let builder = Builder::new(1).buf_len(4096).ring_entries(10);
+
+            register_buf_ring(builder).await.unwrap();
         })
     }
 
     #[test]
-    fn test_build_in_spawn() {
+    fn test_unregister() {
         block_on(async move {
-            spawn(async move {
-                Builder::new(1)
-                    .buf_len(4096)
-                    .ring_entries(10)
-                    .build()
-                    .unwrap();
-            })
-            .await
+            let builder = Builder::new(1).buf_len(4096).ring_entries(10);
+
+            register_buf_ring(builder).await.unwrap();
+            unregister_buf_ring(1);
         })
     }
 }

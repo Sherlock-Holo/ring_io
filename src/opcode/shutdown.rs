@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 
 use crate::op::Completable;
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 use crate::Op;
 
 pub struct Shutdown {
@@ -24,7 +24,7 @@ impl Shutdown {
         let entry = opcode::Shutdown::new(Fd(fd), how).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { _priv: () }, receiver, data_drop)
     }

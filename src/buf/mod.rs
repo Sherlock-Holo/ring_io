@@ -8,7 +8,8 @@
 
 pub use io_buf::IoBuf;
 pub use io_buf_mut::IoBufMut;
-pub use ring_buffer::{Builder, FixedSizeBufRing, GBuf};
+pub(crate) use ring_buffer::FixedSizeBufRing;
+pub use ring_buffer::{Builder, GBuf};
 pub use slice::Slice;
 
 mod io_buf;

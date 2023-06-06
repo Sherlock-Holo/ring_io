@@ -8,7 +8,7 @@ use io_uring::types::Fd;
 use crate::buf::{FixedSizeBufRing, GBuf};
 use crate::op::Completable;
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 use crate::Op;
 
 pub struct RecvWithBufRing {
@@ -16,7 +16,10 @@ pub struct RecvWithBufRing {
 }
 
 impl RecvWithBufRing {
-    pub(crate) fn new(fd: RawFd, buf_ring: FixedSizeBufRing) -> Op<Self> {
+    pub(crate) fn new(fd: RawFd, bgid: u16) -> Op<Self> {
+        let buf_ring = with_driver(|driver| driver.buf_ring_ref(bgid).cloned())
+            .unwrap_or_else(|| panic!("bgid {bgid} not exists"));
+
         let entry = Recv::new(Fd(fd), ptr::null_mut(), buf_ring.buf_len() as _)
             .buf_group(buf_ring.buf_group())
             .build()
@@ -24,7 +27,7 @@ impl RecvWithBufRing {
         let (operation, receiver, data_drop) =
             Operation::new_with_buf_ring(buf_ring.clone(), false);
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(
             Self {
@@ -62,6 +65,7 @@ mod tests {
     use super::*;
     use crate::block_on;
     use crate::buf::Builder;
+    use crate::runtime::register_buf_ring;
 
     #[test]
     fn test_recv_tcp() {
@@ -79,17 +83,13 @@ mod tests {
 
             let stream = TcpStream::connect(addr).unwrap();
 
-            let buf_ring = Builder::new(10)
-                .buf_len(4096)
-                .ring_entries(1024)
-                .build()
-                .unwrap();
+            let builder = Builder::new(1).buf_len(4096).ring_entries(1024);
+
+            register_buf_ring(builder).await.unwrap();
 
             let mut data = vec![];
             loop {
-                let g_buf = RecvWithBufRing::new(stream.as_raw_fd(), buf_ring.clone())
-                    .await
-                    .unwrap();
+                let g_buf = RecvWithBufRing::new(stream.as_raw_fd(), 1).await.unwrap();
 
                 if g_buf.is_empty() {
                     break;
@@ -118,14 +118,12 @@ mod tests {
                 server.send_to(b"world", client_addr).unwrap();
             });
 
-            let buf_ring = Builder::new(2)
-                .buf_len(4096)
-                .ring_entries(2)
-                .build()
-                .unwrap();
+            let builder = Builder::new(2).buf_len(4096).ring_entries(1024);
+
+            register_buf_ring(builder).await.unwrap();
 
             assert_eq!(
-                RecvWithBufRing::new(client.as_raw_fd(), buf_ring.clone())
+                RecvWithBufRing::new(client.as_raw_fd(), 2)
                     .await
                     .unwrap()
                     .as_ref(),
@@ -133,7 +131,7 @@ mod tests {
             );
 
             assert_eq!(
-                RecvWithBufRing::new(client.as_raw_fd(), buf_ring.clone())
+                RecvWithBufRing::new(client.as_raw_fd(), 2)
                     .await
                     .unwrap()
                     .as_ref(),

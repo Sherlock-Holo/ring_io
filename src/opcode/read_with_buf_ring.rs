@@ -5,35 +5,30 @@ use io_uring::opcode::Read;
 use io_uring::squeue::Flags;
 use io_uring::types::Fd;
 
-use crate::buf::{FixedSizeBufRing, GBuf};
+use crate::buf::GBuf;
 use crate::op::Completable;
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 use crate::Op;
 
-pub struct ReadWithBufRing {
-    _buf_ring: FixedSizeBufRing,
-}
+#[non_exhaustive]
+pub struct ReadWithBufRing {}
 
 impl ReadWithBufRing {
-    pub(crate) fn new(fd: RawFd, buf_ring: FixedSizeBufRing, offset: u64) -> Op<Self> {
+    pub(crate) fn new(fd: RawFd, bgid: u16, offset: u64) -> Op<Self> {
+        let buf_ring = with_driver(|driver| driver.buf_ring_ref(bgid).cloned())
+            .unwrap_or_else(|| panic!("bgid {bgid} not exists"));
+
         let entry = Read::new(Fd(fd), ptr::null_mut(), buf_ring.buf_len() as _)
             .offset(offset)
-            .buf_group(buf_ring.buf_group())
+            .buf_group(bgid)
             .build()
             .flags(Flags::BUFFER_SELECT);
-        let (operation, receiver, data_drop) =
-            Operation::new_with_buf_ring(buf_ring.clone(), false);
+        let (operation, receiver, data_drop) = Operation::new_with_buf_ring(buf_ring, false);
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
-        Op::new(
-            Self {
-                _buf_ring: buf_ring,
-            },
-            receiver,
-            data_drop,
-        )
+        Op::new(Self {}, receiver, data_drop)
     }
 }
 
@@ -64,23 +59,22 @@ mod tests {
     use super::*;
     use crate::block_on;
     use crate::buf::Builder;
+    use crate::runtime::register_buf_ring;
 
     #[test]
     fn test_read_file() {
         block_on(async move {
             let file_data = fs::read("testdata/book.txt").unwrap();
             let file = File::open("testdata/book.txt").unwrap();
-            let buf_ring = Builder::new(1)
-                .buf_len(4096)
-                .ring_entries(1024)
-                .build()
-                .unwrap();
+            let builder = Builder::new(1).buf_len(4096).ring_entries(1024);
+
+            register_buf_ring(builder).await.unwrap();
 
             let mut data = vec![];
             let mut offset = 0;
 
             loop {
-                let g_buf = ReadWithBufRing::new(file.as_raw_fd(), buf_ring.clone(), offset)
+                let g_buf = ReadWithBufRing::new(file.as_raw_fd(), 1, offset)
                     .await
                     .unwrap();
 
@@ -112,16 +106,14 @@ mod tests {
 
             let stream = TcpStream::connect(addr).unwrap();
 
-            let buf_ring = Builder::new(1)
-                .buf_len(4096)
-                .ring_entries(1024)
-                .build()
-                .unwrap();
+            let builder = Builder::new(2).buf_len(4096).ring_entries(1024);
+
+            register_buf_ring(builder).await.unwrap();
 
             let mut data = vec![];
 
             loop {
-                let g_buf = ReadWithBufRing::new(stream.as_raw_fd(), buf_ring.clone(), u64::MAX)
+                let g_buf = ReadWithBufRing::new(stream.as_raw_fd(), 2, u64::MAX)
                     .await
                     .unwrap();
 

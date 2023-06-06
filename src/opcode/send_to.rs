@@ -9,7 +9,7 @@ use socket2::SockAddr;
 use crate::buf::IoBuf;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct SendTo<T: IoBuf> {
@@ -38,7 +38,7 @@ impl<T: IoBuf> SendTo<T> {
         let entry = opcode::SendMsg::new(Fd(fd), msghdr.as_ref() as *const _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(
             Self {

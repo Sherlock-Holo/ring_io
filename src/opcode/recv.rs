@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 use crate::buf::IoBufMut;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct Recv<T: IoBufMut> {
@@ -18,7 +18,7 @@ impl<T: IoBufMut> Recv<T> {
         let entry = opcode::Recv::new(Fd(fd), buf.stable_mut_ptr(), buf.bytes_total() as _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { buffer: buf }, receiver, data_drop)
     }

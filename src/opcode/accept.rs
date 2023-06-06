@@ -10,7 +10,7 @@ use socket2::SockAddr;
 
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 
 pub struct Accept {
     addr_with_len: Box<AddrWithLen>,
@@ -35,7 +35,7 @@ impl Accept {
         .build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { addr_with_len }, receiver, data_drop)
     }

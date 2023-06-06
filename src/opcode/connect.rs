@@ -8,7 +8,7 @@ use socket2::SockAddr;
 
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime_context;
+use crate::per_thread::runtime::with_driver;
 
 pub struct Connect {
     addr: Box<SockAddr>,
@@ -20,7 +20,7 @@ impl Connect {
         let entry = opcode::Connect::new(Fd(fd), addr.as_ptr(), addr.len()).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime_context(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { addr }, receiver, data_drop)
     }

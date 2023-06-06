@@ -9,6 +9,7 @@ use futures_util::{FutureExt, Stream, StreamExt};
 
 use crate::operation::{Droppable, OperationResult};
 
+#[must_use = "io_uring operation has been submitted"]
 pub struct Op<T: Completable> {
     data: Option<T>,
     result_receiver: RecvFut<'static, OperationResult>,
@@ -60,6 +61,7 @@ pub trait Completable: Send + Unpin + 'static {
     fn data_drop(self) -> Option<Box<dyn Droppable>>;
 }
 
+#[must_use = "io_uring operation has been submitted"]
 pub struct MultiOp<T: MultiCompletable> {
     data: Option<T>,
     result_receiver: RecvStream<'static, OperationResult>,

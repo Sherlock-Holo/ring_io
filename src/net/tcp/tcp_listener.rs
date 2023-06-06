@@ -15,7 +15,8 @@ use crate::fd_trait;
 use crate::net::tcp::TcpStream;
 use crate::op::Op;
 use crate::opcode::{self, Close};
-use crate::runtime::{in_ring_io_context, spawn};
+use crate::per_thread::runtime::in_per_thread_runtime;
+use crate::runtime::spawn;
 
 #[derive(Debug)]
 pub struct TcpListener {
@@ -77,7 +78,7 @@ impl Drop for TcpListener {
             return;
         }
 
-        if in_ring_io_context() {
+        if in_per_thread_runtime() {
             spawn(self.close()).detach();
         } else {
             unsafe {
