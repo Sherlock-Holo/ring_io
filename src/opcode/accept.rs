@@ -10,7 +10,7 @@ use socket2::SockAddr;
 
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 
 pub struct Accept {
     addr_with_len: Box<AddrWithLen>,
@@ -35,7 +35,7 @@ impl Accept {
         .build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { addr_with_len }, receiver, data_drop)
     }
@@ -75,28 +75,22 @@ mod tests {
 
     #[test]
     fn test_accept() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
+        block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
 
-        let join_handle = thread::spawn(move || TcpStream::connect(addr).unwrap());
-
-        let (mut tcp, from) = block_on(async move {
+            let join_handle = thread::spawn(move || TcpStream::connect(addr).unwrap());
             let fd = listener.as_raw_fd();
-
             let (fd, from) = Accept::new(fd).await.unwrap();
+            let mut tcp = unsafe { TcpStream::from_raw_fd(fd) };
+            let mut tcp2 = join_handle.join().unwrap();
+            assert_eq!(tcp2.local_addr().unwrap(), from);
 
-            let tcp = unsafe { TcpStream::from_raw_fd(fd) };
+            tcp.write_all(b"test").unwrap();
+            let mut buf = [0; 4];
+            tcp2.read_exact(&mut buf).unwrap();
 
-            (tcp, from)
-        });
-
-        let mut tcp2 = join_handle.join().unwrap();
-        assert_eq!(tcp2.local_addr().unwrap(), from);
-
-        tcp.write_all(b"test").unwrap();
-        let mut buf = [0; 4];
-        tcp2.read_exact(&mut buf).unwrap();
-
-        assert_eq!(&buf, b"test");
+            assert_eq!(&buf, b"test");
+        })
     }
 }

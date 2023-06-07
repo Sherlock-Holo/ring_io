@@ -1,16 +1,18 @@
 use std::io;
-use std::net::SocketAddr;
-use std::os::fd::{IntoRawFd, RawFd};
+use std::mem::ManuallyDrop;
+use std::net::{Shutdown, SocketAddr};
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_int;
 
 use socket2::{Domain, Socket, Type};
 
 use crate::buf::{IoBuf, IoBufMut};
-use crate::fd_trait;
 use crate::io::WriteAll;
-use crate::op::Op;
-use crate::opcode::{Close, Connect, Read, Write};
-use crate::runtime::{in_ring_io_context, spawn};
+use crate::op::{MultiOp, Op};
+use crate::opcode::{Close, Connect, Read, ReadWithBufRing, RecvMulti, Write};
+use crate::per_thread::runtime::in_per_thread_runtime;
+use crate::runtime::spawn;
+use crate::{fd_trait, opcode};
 
 #[derive(Debug)]
 pub struct TcpStream {
@@ -51,12 +53,36 @@ impl TcpStream {
         Read::new(self.fd, buf, 0)
     }
 
+    pub fn read_with_buf_ring(&self, buffer_group: u16) -> Op<ReadWithBufRing> {
+        ReadWithBufRing::new(self.fd, buffer_group, 0)
+    }
+
+    pub fn recv_multi(&self, buffer_group: u16) -> MultiOp<RecvMulti> {
+        RecvMulti::new(self.fd, buffer_group)
+    }
+
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {
         Write::new(self.fd, buf, 0)
     }
 
     pub fn write_all<B: IoBuf>(&self, buf: B) -> WriteAll<B, Self> {
         WriteAll::new(self, buf)
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let std_stream = ManuallyDrop::new(unsafe { std::net::TcpStream::from_raw_fd(self.fd) });
+
+        std_stream.local_addr()
+    }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        let std_stream = ManuallyDrop::new(unsafe { std::net::TcpStream::from_raw_fd(self.fd) });
+
+        std_stream.peer_addr()
+    }
+
+    pub fn shutdown(&self, how: Shutdown) -> Op<opcode::Shutdown> {
+        opcode::Shutdown::new(self.fd, how)
     }
 
     pub fn close(&mut self) -> Op<Close> {
@@ -75,7 +101,7 @@ impl Drop for TcpStream {
             return;
         }
 
-        if in_ring_io_context() {
+        if in_per_thread_runtime() {
             spawn(self.close()).detach();
         } else {
             unsafe {

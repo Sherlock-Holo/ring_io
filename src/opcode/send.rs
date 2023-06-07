@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 use crate::buf::IoBuf;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct Send<T: IoBuf> {
@@ -18,7 +18,7 @@ impl<T: IoBuf> Send<T> {
         let entry = opcode::Send::new(Fd(fd), buf.stable_ptr(), buf.bytes_init() as _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { buffer: buf }, receiver, data_drop)
     }
@@ -50,15 +50,15 @@ mod tests {
 
     #[test]
     fn test_tcp_send() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let join_handle = thread::spawn(move || listener.accept().unwrap().0);
-
-        let tcp1 = TcpStream::connect(addr).unwrap();
-        let mut tcp2 = join_handle.join().unwrap();
-
         block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let join_handle = thread::spawn(move || listener.accept().unwrap().0);
+
+            let tcp1 = TcpStream::connect(addr).unwrap();
+            let mut tcp2 = join_handle.join().unwrap();
+
             let fd = tcp1.as_raw_fd();
 
             let (result, _) = Send::new(fd, b"test").await;
@@ -73,13 +73,13 @@ mod tests {
 
     #[test]
     fn test_udp_send() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+
             let fd = client.as_raw_fd();
 
             let (result, _) = Send::new(fd, b"test".as_slice()).await;

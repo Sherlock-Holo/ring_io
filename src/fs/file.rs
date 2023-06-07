@@ -7,8 +7,9 @@ use crate::buf::{IoBuf, IoBufMut};
 use crate::fd_trait;
 use crate::io::WriteAll;
 use crate::op::Op;
-use crate::opcode::{Close, Read, Write};
-use crate::runtime::{in_ring_io_context, spawn};
+use crate::opcode::{Close, Read, ReadWithBufRing, Write};
+use crate::per_thread::runtime::in_per_thread_runtime;
+use crate::runtime::spawn;
 
 #[derive(Debug)]
 pub struct File {
@@ -49,6 +50,10 @@ impl File {
         Read::new(self.fd, buf, u64::MAX)
     }
 
+    pub fn read_with_buf_ring(&self, buffer_group: u16) -> Op<ReadWithBufRing> {
+        ReadWithBufRing::new(self.fd, buffer_group, u64::MAX)
+    }
+
     pub fn write<B: IoBuf>(&self, buf: B) -> Op<Write<B>> {
         Write::new(self.fd, buf, u64::MAX)
     }
@@ -71,7 +76,7 @@ impl Drop for File {
             return;
         }
 
-        if in_ring_io_context() {
+        if in_per_thread_runtime() {
             spawn(Close::new(self.fd)).detach()
         } else {
             unsafe {

@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::future::Future;
 use std::io;
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_int;
@@ -14,7 +15,8 @@ use crate::fd_trait;
 use crate::net::tcp::TcpStream;
 use crate::op::Op;
 use crate::opcode::{self, Close};
-use crate::runtime::{in_ring_io_context, spawn};
+use crate::per_thread::runtime::in_per_thread_runtime;
+use crate::runtime::spawn;
 
 #[derive(Debug)]
 pub struct TcpListener {
@@ -53,6 +55,13 @@ impl TcpListener {
         }
     }
 
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let std_listener =
+            ManuallyDrop::new(unsafe { std::net::TcpListener::from_raw_fd(self.fd) });
+
+        std_listener.local_addr()
+    }
+
     pub fn close(&mut self) -> Op<Close> {
         let fd = self.fd;
         self.fd = -1;
@@ -69,7 +78,7 @@ impl Drop for TcpListener {
             return;
         }
 
-        if in_ring_io_context() {
+        if in_per_thread_runtime() {
             spawn(self.close()).detach();
         } else {
             unsafe {
@@ -138,5 +147,32 @@ impl Future for Accept {
 
         // Safety: fd is valid
         unsafe { Poll::Ready(Ok((TcpStream::from_raw_fd(fd), addr))) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_on;
+
+    #[test]
+    fn test() {
+        block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let task = spawn(async move { listener.accept().await.unwrap().0 });
+
+            let stream1 = TcpStream::connect(addr).await.unwrap();
+            let stream2 = task.await;
+
+            assert_eq!(stream1.write_all(b"test").await.0.unwrap(), 4);
+
+            let buf = vec![0; 4];
+            let (result, buf) = stream2.read(buf).await;
+            assert_eq!(result.unwrap(), 4);
+
+            assert_eq!(buf, b"test");
+        });
     }
 }

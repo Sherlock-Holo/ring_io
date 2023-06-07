@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 use crate::buf::IoBufMut;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct Recv<T: IoBufMut> {
@@ -18,7 +18,7 @@ impl<T: IoBufMut> Recv<T> {
         let entry = opcode::Recv::new(Fd(fd), buf.stable_mut_ptr(), buf.bytes_total() as _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { buffer: buf }, receiver, data_drop)
     }
@@ -57,18 +57,19 @@ mod tests {
 
     #[test]
     fn test_tcp_recv() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let join_handle = thread::spawn(move || listener.accept().unwrap().0);
-
-        let mut tcp1 = TcpStream::connect(addr).unwrap();
-        let tcp2 = join_handle.join().unwrap();
-
-        tcp1.write_all(b"test").unwrap();
-
-        let fd = tcp2.as_raw_fd();
         block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let join_handle = thread::spawn(move || listener.accept().unwrap().0);
+
+            let mut tcp1 = TcpStream::connect(addr).unwrap();
+            let tcp2 = join_handle.join().unwrap();
+
+            tcp1.write_all(b"test").unwrap();
+
+            let fd = tcp2.as_raw_fd();
+
             let buf = vec![0; 4];
 
             let (result, buf) = Recv::new(fd, buf).await;
@@ -81,16 +82,16 @@ mod tests {
 
     #[test]
     fn test_udp_recv() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-        let client_addr = client.local_addr().unwrap();
-
-        server.send_to(b"test", client_addr).unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+            let client_addr = client.local_addr().unwrap();
+
+            server.send_to(b"test", client_addr).unwrap();
+
             let fd = client.as_raw_fd();
             let buf = vec![0; 4];
 

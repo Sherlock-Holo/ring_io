@@ -1,15 +1,17 @@
 use std::io;
+use std::mem::ManuallyDrop;
 use std::net::SocketAddr;
-use std::os::fd::{IntoRawFd, RawFd};
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_int;
 
 use socket2::{Domain, SockAddr, Socket, Type};
 
 use crate::buf::{IoBuf, IoBufMut};
 use crate::fd_trait;
-use crate::op::Op;
-use crate::opcode::{self, Close, Connect, Recv, RecvFrom, SendTo};
-use crate::runtime::{in_ring_io_context, spawn};
+use crate::op::{MultiOp, Op};
+use crate::opcode::{self, Close, Connect, Recv, RecvFrom, RecvMulti, RecvWithBufRing, SendTo};
+use crate::per_thread::runtime::in_per_thread_runtime;
+use crate::runtime::spawn;
 
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -52,12 +54,34 @@ impl UdpSocket {
         Recv::new(self.fd, buf)
     }
 
+    pub fn recv_with_buf_ring(&self, buffer_group: u16) -> Op<RecvWithBufRing> {
+        RecvWithBufRing::new(self.fd, buffer_group)
+    }
+
+    pub fn recv_multi(&self, buffer_group: u16) -> MultiOp<RecvMulti> {
+        RecvMulti::new(self.fd, buffer_group)
+    }
+
     pub fn send_to<B: IoBuf>(&self, buf: B, addr: SocketAddr) -> Op<SendTo<B>> {
         SendTo::new(self.fd, buf, addr)
     }
 
     pub fn recv_from<B: IoBufMut>(&self, buf: B) -> Op<RecvFrom<B>> {
         RecvFrom::new(self.fd, buf)
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        let std_udp_socket =
+            ManuallyDrop::new(unsafe { std::net::UdpSocket::from_raw_fd(self.fd) });
+
+        std_udp_socket.local_addr()
+    }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        let std_udp_socket =
+            ManuallyDrop::new(unsafe { std::net::UdpSocket::from_raw_fd(self.fd) });
+
+        std_udp_socket.peer_addr()
     }
 
     pub fn close(&mut self) -> Op<Close> {
@@ -76,7 +100,7 @@ impl Drop for UdpSocket {
             return;
         }
 
-        if in_ring_io_context() {
+        if in_per_thread_runtime() {
             spawn(self.close()).detach();
         } else {
             unsafe {

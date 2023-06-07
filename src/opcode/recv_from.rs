@@ -11,7 +11,7 @@ use socket2::SockAddr;
 use crate::buf::IoBufMut;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct RecvFrom<T: IoBufMut> {
@@ -46,7 +46,7 @@ impl<T: IoBufMut> RecvFrom<T> {
         let entry = opcode::RecvMsg::new(Fd(fd), &mut data.msg as *mut _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { data }, receiver, data_drop)
     }
@@ -105,16 +105,16 @@ mod tests {
 
     #[test]
     fn test_udp_recv_from() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-        let client_addr = client.local_addr().unwrap();
-
-        client.send(b"test").unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+            let client_addr = client.local_addr().unwrap();
+
+            client.send(b"test").unwrap();
+
             let fd = server.as_raw_fd();
             let buf = vec![0; 4];
 

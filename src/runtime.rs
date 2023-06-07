@@ -1,35 +1,119 @@
 use std::future::Future;
-use std::io;
-use std::rc::Rc;
-use std::task::{Context, Poll};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread::{available_parallelism, JoinHandle};
+use std::{io, thread};
 
-use async_task::Runnable;
-use flume::{Receiver, Sender};
-use futures_util::task::noop_waker_ref;
-use futures_util::FutureExt;
-use io_uring::squeue::Entry;
-pub use io_uring::Builder;
-use io_uring::IoUring;
-use once_cell::sync::Lazy;
+use flume::Sender;
+use io_uring::{Builder, IoUring};
+use rand::prelude::{thread_rng, SliceRandom};
 
-use crate::driver::Driver;
-use crate::operation::Operation;
+use crate::buf;
+use crate::per_thread::runtime::{PerThreadRuntime, TaskReceive};
 
-static TX_RX: Lazy<(Sender<Runnable>, Receiver<Runnable>)> = Lazy::new(flume::unbounded);
+const ENTRIES: u32 = 1024;
 
 pub type Task<T> = async_task::Task<T>;
 
 thread_local! {
-    static RUNTIME: std::cell::RefCell<Option<Runtime>> = std::cell::RefCell::new(None);
+    static WORKER_SENDERS: OnceLock<Arc<[Sender<TaskReceive>]>> = OnceLock::new();
 }
 
 pub struct Runtime {
-    driver: Rc<Driver>,
+    worker_senders: Arc<[Sender<TaskReceive>]>,
+    shutdown: Arc<AtomicBool>,
+    worker_threads: Vec<JoinHandle<()>>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Runtime {
-    pub(crate) fn submit(&self, entry: Entry, operation: Operation) -> io::Result<u64> {
-        self.driver.submit(entry, operation)
+    pub fn new() -> Self {
+        let threads = available_parallelism()
+            .unwrap_or(NonZeroUsize::new(4).unwrap())
+            .get();
+
+        let mut builder = IoUring::builder();
+        builder.dontfork();
+
+        Self::new_with(builder, threads)
+    }
+
+    pub fn new_with(builder: Builder, threads: usize) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut worker_threads = Vec::with_capacity(threads);
+
+        let mut worker_senders = Vec::with_capacity(threads);
+        let mut task_receivers = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let (sender, receiver) = flume::unbounded();
+            worker_senders.push(sender);
+            task_receivers.push(receiver);
+        }
+
+        let worker_senders: Arc<[Sender<TaskReceive>]> = worker_senders.into();
+
+        for task_receiver in task_receivers {
+            let mut per_thread_runtime =
+                PerThreadRuntime::new(builder.clone(), ENTRIES, task_receiver);
+            let shutdown = shutdown.clone();
+            let worker_senders = worker_senders.clone();
+
+            let join_handle = thread::spawn(move || {
+                WORKER_SENDERS.with(|senders| {
+                    let _ = senders.set(worker_senders);
+                });
+
+                per_thread_runtime.run(shutdown)
+            });
+            worker_threads.push(join_handle);
+        }
+
+        Self {
+            worker_senders,
+            shutdown,
+            worker_threads,
+        }
+    }
+
+    pub fn block_on<F>(&mut self, fut: F) -> F::Output
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let sender = self
+            .worker_senders
+            .choose(&mut thread_rng())
+            .unwrap()
+            .clone();
+
+        let (output_sender, output_receiver) = flume::bounded(1);
+        inner_spawn(
+            async move {
+                let output = fut.await;
+
+                let _ = output_sender.send(output);
+            },
+            sender,
+        )
+        .detach();
+
+        output_receiver.recv().unwrap()
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+
+        for join_handle in self.worker_threads.drain(..) {
+            let _ = join_handle.join();
+        }
     }
 }
 
@@ -38,53 +122,38 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    block_on_with_io_uring_builder(fut, &create_io_uring_builder())
+    Runtime::new().block_on(fut)
 }
 
-pub fn block_on_with_io_uring_builder<F>(fut: F, builder: &Builder) -> F::Output
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let driver = RUNTIME.with(|runtime| {
-        let mut runtime = runtime.borrow_mut();
-        if runtime.is_some() {
-            panic!("can't call block_on nested");
+pub async fn register_buf_ring(builder: buf::Builder) -> io::Result<()> {
+    let result_receivers = WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        let mut result_receivers = Vec::with_capacity(senders.len());
+        for sender in senders.iter() {
+            let (result_sender, result_receiver) = flume::bounded(1);
+            sender
+                .send(TaskReceive::RegisterBufRing(builder, result_sender))
+                .unwrap();
+            result_receivers.push(result_receiver);
         }
 
-        let task_receiver = TX_RX.1.clone();
-        let driver = Driver::new_with_io_uring_builder(task_receiver, builder).unwrap();
-
-        let driver = Rc::new(driver);
-
-        *runtime = Some(Runtime {
-            driver: driver.clone(),
-        });
-
-        driver
+        result_receivers
     });
 
-    let (runnable, mut task) = async_task::spawn(fut, schedule);
-    runnable.schedule();
+    for receiver in result_receivers {
+        receiver.recv_async().await.unwrap()?;
+    }
 
-    let output = loop {
-        driver
-            .run()
-            .unwrap_or_else(|err| panic!("driver panic {err}"));
+    Ok(())
+}
 
-        if task.is_finished() {
-            match task.poll_unpin(&mut Context::from_waker(noop_waker_ref())) {
-                Poll::Ready(output) => break output,
-                Poll::Pending => unreachable!("finished task return pending"),
-            }
+pub fn unregister_buf_ring(bgid: u16) {
+    WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        for sender in senders.iter() {
+            sender.send(TaskReceive::UnRegisterBufRing(bgid)).unwrap();
         }
-    };
-
-    RUNTIME.with(|runtime| {
-        runtime.borrow_mut().take();
     });
-
-    output
 }
 
 pub fn spawn<F>(fut: F) -> Task<F::Output>
@@ -92,38 +161,29 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let (runnable, task) = async_task::spawn(fut, schedule);
+    let sender = WORKER_SENDERS.with(|senders| {
+        let senders = senders.get().expect("not in ring_io context");
+        senders.choose(&mut thread_rng()).unwrap().clone()
+    });
+
+    inner_spawn(fut, sender)
+}
+
+fn inner_spawn<F>(fut: F, sender: Sender<TaskReceive>) -> Task<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (runnable, task) = async_task::spawn(fut, move |runnable| {
+        sender.send(TaskReceive::Runnable(runnable)).unwrap();
+    });
     runnable.schedule();
 
     task
 }
 
-pub fn create_io_uring_builder() -> Builder {
-    IoUring::builder()
-}
-
-pub(crate) fn in_ring_io_context() -> bool {
-    RUNTIME.with(|runtime| runtime.borrow().is_some())
-}
-
-pub(crate) fn with_runtime<T, F: FnOnce(&Runtime) -> T>(f: F) -> T {
-    RUNTIME.with(|runtime| {
-        let runtime = runtime.borrow();
-        let runtime = runtime.as_ref().expect("runtime not init");
-
-        f(runtime)
-    })
-}
-
-fn schedule(runnable: Runnable) {
-    TX_RX.0.send(runnable).unwrap();
-}
-
-// all test must create a new thread, because block_on can't call nested
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
-    use std::thread;
     use std::time::{Duration, Instant};
 
     use futures_timer::Delay;
@@ -166,20 +226,5 @@ mod tests {
 
         let duration = start.elapsed();
         assert_eq!(duration.as_secs(), 1);
-    }
-
-    #[test]
-    fn multi_thread() {
-        thread::spawn(|| block_on(pending::<()>()));
-
-        block_on(async move {
-            let tasks = (0..10)
-                .map(|_| spawn(async move { Delay::new(Duration::from_secs(1)).await }))
-                .collect::<Vec<_>>();
-
-            for task in tasks {
-                task.await;
-            }
-        })
     }
 }

@@ -6,7 +6,7 @@ use io_uring::types::Fd;
 use crate::buf::IoBuf;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct Write<T: IoBuf> {
@@ -20,7 +20,7 @@ impl<T: IoBuf> Write<T> {
             .build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(Self { buffer: buf }, receiver, data_drop)
     }
@@ -54,34 +54,34 @@ mod tests {
 
     #[test]
     fn test_file_write() {
-        let mut file = NamedTempFile::new().unwrap();
-        let fd = file.as_raw_fd();
-
         block_on(async move {
+            let mut file = NamedTempFile::new().unwrap();
+            let fd = file.as_raw_fd();
+
             let (result, _) = Write::new(fd, b"hello".as_slice(), 0).await;
             assert_eq!(result.unwrap(), 5);
 
             let (result, _) = Write::new(fd, b"world".as_slice(), 5).await;
             assert_eq!(result.unwrap(), 5);
+
+            let mut buf = vec![];
+            file.read_to_end(&mut buf).unwrap();
+
+            assert_eq!(buf, b"helloworld");
         });
-
-        let mut buf = vec![];
-        file.read_to_end(&mut buf).unwrap();
-
-        assert_eq!(buf, b"helloworld");
     }
 
     #[test]
     fn test_socket_write() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let join_handle = thread::spawn(move || listener.accept().unwrap().0);
-
-        let tcp1 = TcpStream::connect(addr).unwrap();
-        let mut tcp2 = join_handle.join().unwrap();
-
         block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let join_handle = thread::spawn(move || listener.accept().unwrap().0);
+
+            let tcp1 = TcpStream::connect(addr).unwrap();
+            let mut tcp2 = join_handle.join().unwrap();
+
             let fd = tcp1.as_raw_fd();
 
             let (result, _) = Write::new(fd, b"test".as_slice(), 0).await;

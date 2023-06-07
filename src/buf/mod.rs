@@ -8,10 +8,13 @@
 
 pub use io_buf::IoBuf;
 pub use io_buf_mut::IoBufMut;
+pub(crate) use ring_buffer::FixedSizeBufRing;
+pub use ring_buffer::{Builder, GBuf};
 pub use slice::Slice;
 
 mod io_buf;
 mod io_buf_mut;
+mod ring_buffer;
 mod slice;
 
 pub(crate) fn deref(buf: &impl IoBuf) -> &[u8] {

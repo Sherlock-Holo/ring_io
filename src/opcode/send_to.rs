@@ -9,7 +9,7 @@ use socket2::SockAddr;
 use crate::buf::IoBuf;
 use crate::op::{Completable, Op};
 use crate::operation::{Droppable, Operation, OperationResult};
-use crate::runtime::with_runtime;
+use crate::per_thread::runtime::with_driver;
 use crate::BufResult;
 
 pub struct SendTo<T: IoBuf> {
@@ -38,7 +38,7 @@ impl<T: IoBuf> SendTo<T> {
         let entry = opcode::SendMsg::new(Fd(fd), msghdr.as_ref() as *const _).build();
         let (operation, receiver, data_drop) = Operation::new();
 
-        with_runtime(|runtime| runtime.submit(entry, operation)).unwrap();
+        with_driver(|driver| driver.push_sqe(entry, operation)).unwrap();
 
         Op::new(
             Self {
@@ -79,14 +79,14 @@ mod tests {
 
     #[test]
     fn test_udp_send_to() {
-        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = server.local_addr().unwrap();
-
-        let client = UdpSocket::bind("0.0.0.0:0").unwrap();
-        client.connect(addr).unwrap();
-        let client_addr = client.local_addr().unwrap();
-
         block_on(async move {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = server.local_addr().unwrap();
+
+            let client = UdpSocket::bind("0.0.0.0:0").unwrap();
+            client.connect(addr).unwrap();
+            let client_addr = client.local_addr().unwrap();
+
             let fd = server.as_raw_fd();
 
             let data = Vec::from("test");
