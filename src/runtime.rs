@@ -6,7 +6,8 @@ use std::thread::{available_parallelism, JoinHandle};
 use std::{io, thread};
 
 use flume::Sender;
-use io_uring::{Builder, IoUring};
+pub use io_uring::Builder;
+use io_uring::IoUring;
 use rand::prelude::{thread_rng, SliceRandom};
 
 use crate::buf;
@@ -180,6 +181,10 @@ where
     runnable.schedule();
 
     task
+}
+
+pub fn create_io_uring_builder() -> Builder {
+    IoUring::builder()
 }
 
 #[cfg(test)]
