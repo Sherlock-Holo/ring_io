@@ -38,7 +38,10 @@ impl Runtime {
             .unwrap_or(NonZeroUsize::new(4).unwrap())
             .get();
 
-        Self::new_with(IoUring::builder(), threads)
+        let mut builder = IoUring::builder();
+        builder.dontfork();
+
+        Self::new_with(builder, threads)
     }
 
     pub fn new_with(builder: Builder, threads: usize) -> Self {

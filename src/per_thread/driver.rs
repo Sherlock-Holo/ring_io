@@ -5,7 +5,7 @@ use std::time::Duration;
 use io_uring::squeue::Entry;
 use io_uring::types::{SubmitArgs, Timespec};
 use io_uring::{cqueue, IoUring, Submitter};
-use sharded_slab::Slab;
+use slab::Slab;
 
 use crate::buf::FixedSizeBufRing;
 use crate::operation::{Operation, OperationResult};
@@ -26,11 +26,7 @@ impl PerThreadDriver {
     }
 
     pub fn push_sqe(&mut self, mut entry: Entry, operation: Operation) -> io::Result<u64> {
-        let vacant_entry = loop {
-            if let Some(vacant_entry) = self.ops.vacant_entry() {
-                break vacant_entry;
-            }
-        };
+        let vacant_entry = self.ops.vacant_entry();
         let user_data = vacant_entry.key() as u64;
         entry = entry.user_data(user_data);
         vacant_entry.insert(operation);
