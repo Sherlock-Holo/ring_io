@@ -68,11 +68,7 @@ impl PerThreadRuntime {
                 }
             }
 
-            with_driver(|driver| {
-                driver.submit()?;
-                driver.run_io()
-            })
-            .expect("driver submit failed");
+            with_driver(|driver| driver.run_io()).expect("driver submit failed");
 
             if shutdown.load(Ordering::Acquire) {
                 return;
@@ -100,7 +96,6 @@ pub(crate) fn in_per_thread_runtime() -> bool {
 
 pub(crate) fn with_driver<T, F>(f: F) -> T
 where
-    // for<'a> F: FnOnce(&'a mut PerThreadDriver) -> T + 'a,
     F: FnOnce(&mut PerThreadDriver) -> T,
 {
     DRIVER.with(|driver| {

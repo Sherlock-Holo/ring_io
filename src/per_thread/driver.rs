@@ -46,12 +46,6 @@ impl PerThreadDriver {
         Ok(user_data)
     }
 
-    pub fn submit(&self) -> io::Result<()> {
-        self.ring.submit()?;
-
-        Ok(())
-    }
-
     pub fn submitter(&self) -> Submitter {
         self.ring.submitter()
     }
