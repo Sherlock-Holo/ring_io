@@ -1,4 +1,5 @@
 use std::io;
+use std::mem::ManuallyDrop;
 use std::os::fd::{IntoRawFd, RawFd};
 use std::path::Path;
 
@@ -62,9 +63,9 @@ impl File {
         WriteAll::new(self, buf)
     }
 
-    pub fn close(&mut self) -> Op<Close> {
+    pub fn close(self) -> Op<Close> {
         let fd = self.fd;
-        self.fd = -1;
+        let _ = ManuallyDrop::new(self);
 
         Close::new(fd)
     }
@@ -72,12 +73,8 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
-        if self.fd < 0 {
-            return;
-        }
-
         if in_per_thread_runtime() {
-            spawn(Close::new(self.fd)).detach()
+            spawn(Close::new(self.fd)).detach();
         } else {
             unsafe {
                 libc::close(self.fd);

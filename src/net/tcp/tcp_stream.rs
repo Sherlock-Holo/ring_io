@@ -85,9 +85,9 @@ impl TcpStream {
         opcode::Shutdown::new(self.fd, how)
     }
 
-    pub fn close(&mut self) -> Op<Close> {
+    pub fn close(self) -> Op<Close> {
         let fd = self.fd;
-        self.fd = -1;
+        let _ = ManuallyDrop::new(self);
 
         Close::new(fd)
     }
@@ -97,12 +97,8 @@ fd_trait!(TcpStream);
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        if self.fd == -1 {
-            return;
-        }
-
         if in_per_thread_runtime() {
-            spawn(self.close()).detach();
+            spawn(Close::new(self.fd)).detach();
         } else {
             unsafe {
                 libc::close(self.fd);

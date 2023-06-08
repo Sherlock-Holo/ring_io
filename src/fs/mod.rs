@@ -11,7 +11,7 @@ mod file;
 mod open_options;
 
 pub async fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
-    let mut file = File::open(path).await?;
+    let file = File::open(path).await?;
     let mut data = vec![];
     let mut buf = vec![0; 4096];
 
