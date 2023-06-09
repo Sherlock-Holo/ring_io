@@ -565,7 +565,7 @@ mod tests {
             let builder = Builder::new(1).buf_len(4096).ring_entries(10);
 
             register_buf_ring(builder).await.unwrap();
-            unregister_buf_ring(1);
+            unregister_buf_ring(1).await.unwrap();
         })
     }
 }

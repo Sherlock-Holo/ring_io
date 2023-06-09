@@ -189,13 +189,26 @@ pub async fn register_buf_ring(builder: buf::Builder) -> io::Result<()> {
     Ok(())
 }
 
-pub fn unregister_buf_ring(bgid: u16) {
-    IO_URING_MODIFY_SENDERS.with(|senders| {
+pub async fn unregister_buf_ring(bgid: u16) -> io::Result<()> {
+    let result_receivers = IO_URING_MODIFY_SENDERS.with(|senders| {
         let senders = senders.get().expect("not in ring_io context");
+        let mut result_receivers = Vec::with_capacity(senders.len());
         for sender in senders.iter() {
-            sender.send(IoUringModify::UnRegisterBufRing(bgid)).unwrap();
+            let (result_sender, result_receiver) = flume::bounded(1);
+            sender
+                .send(IoUringModify::UnRegisterBufRing(bgid, result_sender))
+                .unwrap();
+            result_receivers.push(result_receiver);
         }
+
+        result_receivers
     });
+
+    for receiver in result_receivers {
+        receiver.recv_async().await.unwrap()?;
+    }
+
+    Ok(())
 }
 
 pub fn spawn<F>(fut: F) -> Task<F::Output>

@@ -9,5 +9,5 @@ pub mod runtime;
 
 pub enum IoUringModify {
     RegisterBufRing(Builder, Sender<io::Result<()>>),
-    UnRegisterBufRing(u16),
+    UnRegisterBufRing(u16, Sender<io::Result<()>>),
 }

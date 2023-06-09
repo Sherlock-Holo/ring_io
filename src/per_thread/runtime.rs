@@ -67,8 +67,9 @@ impl PerThreadRuntime {
                             let _ = result_sender.try_send(result);
                         }
 
-                        IoUringModify::UnRegisterBufRing(bgid) => {
-                            driver.delete_fix_sized_buf_ring(bgid);
+                        IoUringModify::UnRegisterBufRing(bgid, result_sender) => {
+                            let result = driver.delete_fix_sized_buf_ring(bgid);
+                            let _ = result_sender.try_send(result);
                         }
                     }
                 }

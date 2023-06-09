@@ -12,6 +12,8 @@ pub(crate) use ring_buffer::FixedSizeBufRing;
 pub use ring_buffer::{Builder, GBuf};
 pub use slice::Slice;
 
+pub use crate::runtime::{register_buf_ring, unregister_buf_ring};
+
 mod io_buf;
 mod io_buf_mut;
 mod ring_buffer;

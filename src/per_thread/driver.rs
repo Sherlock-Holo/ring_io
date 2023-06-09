@@ -54,9 +54,11 @@ impl PerThreadDriver {
         self.buf_rings.insert(bgid, buf_ring);
     }
 
-    pub fn delete_fix_sized_buf_ring(&mut self, bgid: u16) {
+    pub fn delete_fix_sized_buf_ring(&mut self, bgid: u16) -> io::Result<()> {
         if let Some(buf_ring) = self.buf_rings.remove(&bgid) {
-            let _ = buf_ring.unregister(&self.ring.submitter());
+            buf_ring.unregister(&self.ring.submitter())
+        } else {
+            Ok(())
         }
     }
 
