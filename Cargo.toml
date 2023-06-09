@@ -15,7 +15,7 @@ flume = "0.10"
 bytes = "1"
 socket2 = "0.5"
 slab = "0.4"
-rand = "0.8"
+rayon = "1"
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false }

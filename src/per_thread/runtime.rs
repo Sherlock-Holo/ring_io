@@ -1,74 +1,80 @@
 use std::cell::RefCell;
-use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use async_task::Runnable;
-use flume::{Receiver, Sender};
+use flume::Receiver;
 use io_uring::Builder;
 
-use crate::buf;
+use super::IoUringModify;
 use crate::per_thread::driver::PerThreadDriver;
 
 thread_local! {
     static DRIVER: OnceLock<RefCell<PerThreadDriver>> = OnceLock::new();
 }
 
-pub enum TaskReceive {
-    Runnable(Runnable),
-    RegisterBufRing(buf::Builder, Sender<io::Result<()>>),
-    UnRegisterBufRing(u16),
-}
-
 pub struct PerThreadRuntime {
-    task_receiver: Receiver<TaskReceive>,
+    task_receiver: Receiver<Runnable>,
+    io_uring_modify_receiver: Receiver<IoUringModify>,
     builder: Builder,
     entries: u32,
 }
 
 impl PerThreadRuntime {
     /// new won't create io_uring instance
-    pub fn new(builder: Builder, entries: u32, task_receiver: Receiver<TaskReceive>) -> Self {
+    pub fn new(
+        builder: Builder,
+        entries: u32,
+        task_receiver: Receiver<Runnable>,
+        io_uring_modify_receiver: Receiver<IoUringModify>,
+    ) -> Self {
         Self {
             task_receiver,
+            io_uring_modify_receiver,
             builder,
             entries,
         }
     }
 
     pub fn run(&mut self, shutdown: Arc<AtomicBool>) {
-        const MAX_TASK_ONCE: usize = 61;
+        const MAX_TASK_ONCE: usize = 56; // 61-5
+        const MAX_IO_URING_MODIFY_ONCE: usize = 5;
 
         init_driver(&self.builder, self.entries);
 
         loop {
-            for task_receive in self.task_receiver.try_iter().take(MAX_TASK_ONCE) {
-                match task_receive {
-                    TaskReceive::Runnable(runnable) => {
-                        runnable.run();
-                    }
+            for runnable in self.task_receiver.try_iter().take(MAX_TASK_ONCE) {
+                runnable.run();
+            }
 
-                    TaskReceive::RegisterBufRing(builder, result_sender) => {
-                        let result =
-                            with_driver(|driver| match builder.build(&driver.submitter()) {
+            with_driver(|driver| {
+                for modify in self
+                    .io_uring_modify_receiver
+                    .try_iter()
+                    .take(MAX_IO_URING_MODIFY_ONCE)
+                {
+                    match modify {
+                        IoUringModify::RegisterBufRing(builder, result_sender) => {
+                            let result = match builder.build(&driver.submitter()) {
                                 Ok(buf_ring) => {
                                     driver.add_fix_sized_buf_ring(builder.bgid(), buf_ring);
 
                                     Ok(())
                                 }
                                 Err(err) => Err(err),
-                            });
+                            };
 
-                        let _ = result_sender.try_send(result);
-                    }
+                            let _ = result_sender.try_send(result);
+                        }
 
-                    TaskReceive::UnRegisterBufRing(bgid) => {
-                        with_driver(|driver| driver.delete_fix_sized_buf_ring(bgid))
+                        IoUringModify::UnRegisterBufRing(bgid) => {
+                            driver.delete_fix_sized_buf_ring(bgid);
+                        }
                     }
                 }
-            }
 
-            with_driver(|driver| driver.run_io()).expect("driver submit failed");
+                driver.run_io().expect("driver submit failed");
+            });
 
             if shutdown.load(Ordering::Acquire) {
                 return;
