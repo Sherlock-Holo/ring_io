@@ -1,4 +1,5 @@
 use std::ops;
+use std::sync::Arc;
 
 use super::{GBuf, Slice};
 
@@ -202,6 +203,20 @@ unsafe impl IoBuf for bytes::BytesMut {
 }
 
 unsafe impl IoBuf for GBuf {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl IoBuf for Arc<GBuf> {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()
     }
